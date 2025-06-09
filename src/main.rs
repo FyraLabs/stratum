@@ -5,6 +5,7 @@ mod object;
 mod store;
 mod util;
 mod state;
+mod mount;
 
 fn main() {
     tracing_subscriber::fmt()

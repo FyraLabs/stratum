@@ -130,6 +130,7 @@ impl Cli {
                 );
                 // todo: get or make new head :D
                 store.mount_ref(&stratum_ref, &mountpoint.to_string_lossy())
+                
             }
         }
     }
