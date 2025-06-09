@@ -27,7 +27,7 @@ Stratum is a filesystem layer manager, like a mod manager on steroids. Designed 
 
 - 🎮 Versioned mod profiles for games like Elder Scrolls, Fallout, Cyperpunk 2077, keeping the vanilla game pristine while allowing mods to be layered on top.
 - 💾 Backing up fragile, self-modifying applications/games like *The Sims 2*, allowing you to easily roll back to a previous state if the game breaks or gets corrupted.
-- 🍷 Managing Wineprefixes for different applications, without duplicating the entire Wineprefix for each of them.
+- 🍷 Managing Wineprefixes for different applications, without duplicating the entire Wineprefix for each of them. No more having 100+ copies of Visual C++ redistributables!
 - ⏳ Seamless filesystem snapshots with live rollback support, allowing you to roll-back entire directories with zero downtime.
 
 ## Features
@@ -52,13 +52,6 @@ Layered union filesystems aren't new — but **Stratum** builds on them with a d
 | **Mod Organizer 2**       | MO2 pioneered layered game modding, but relies on fragile Windows VFS hooks. Stratum uses native Linux filesystems, is unprivileged-friendly, and is general-purpose. Initially inspired by MO2, Stratum aims to go beyond games with cleaner UX/DX and CLI support. |
 | **Flatpak / Snap** | These are sandboxed application formats with their own runtime environments. Stratum is not a packaging format but a state management layer. It may be used alongside Flatpak/Snap to manage application state and mod directories without modifying the original files but is not a replacement for them. |
 | **systemd-sysext** | systemd-sysext provides a way to extend system images with additional layers, but is focused on system-level extensions, Stratum is more focused on application-level state management, but can be used alongside it for application-specific layers. |
-
-## Example Use Cases
-
-- Mod management for games, allowing users to layer mods on top of a base game installation without modifying the original files, and easily switch between different modpacks or configurations.
-- Delta updates for games or applications, only providing changed files instead of full downloads, reducing bandwidth and storage requirements.
-- Snapshotting and restoring application state back to previous versions.
-- De-duplicating Wineprefixes for different applications, allowing multiple applications to have their own layered Wineprefixes without duplicating the base prefix. No more having 100+ copies of Visual C++ redistributables!
 
 ## Attributions
 
