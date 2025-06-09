@@ -1,21 +1,54 @@
 use serde::{Deserialize, Serialize};
 mod commit_ref;
 pub use commit_ref::*;
-/// A special metadata for HEAD, for storing data about the underlying header
+/// Metadata for a worktree, representing a named workspace for development
+///
+/// Worktrees provide isolated workspaces where you can make changes on top of a base commit.
+/// Each worktree has its own upperdir (for changes) and workdir (for overlayfs working directory).
+///
+/// Example usage:
+/// ```
+/// use stratum::commit::Worktree;
+///
+/// // Create a new worktree based on a commit
+/// let mut worktree = Worktree::new(
+///     "feature-x".to_string(),
+///     "abc123commit".to_string(),
+///     Some("Working on feature X".to_string()),
+/// );
+///
+/// // Mount it somewhere
+/// worktree.set_mounted_at(Some("/mnt/feature-x".to_string()));
+/// assert!(worktree.is_mounted());
+///
+/// // Check for uncommitted changes (requires upperdir path)
+/// let upperdir = std::path::Path::new("/store/refs/myapp/worktrees/feature-x/upperdir");
+/// let has_changes = worktree.has_uncommitted_changes(upperdir);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Head {
-    /// actual head data
-    pub head: HeadInfo,
+pub struct Worktree {
+    /// actual worktree data
+    pub worktree: WorktreeInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HeadInfo {
-    /// The ID of the last commit, used as lowerdir image for layering
-    pub last_commit: String,
-    /// Last time this head was committed into a new commit
-    /// 
-    /// Optional because HEAD may be a fresh overlay that has not ever been committed yet
+pub struct WorktreeInfo {
+    /// The name of this worktree
+    pub name: String,
+    /// The ID of the base commit this worktree is based on
+    pub base_commit: String,
+    /// When this worktree was created
+    pub created: chrono::DateTime<chrono::Utc>,
+    /// Last time this worktree was modified
+    pub last_modified: chrono::DateTime<chrono::Utc>,
+    /// Last time this worktree was committed into a new commit
+    ///
+    /// Optional because a worktree may be a fresh overlay that has not ever been committed yet
     pub last_committed: Option<chrono::DateTime<chrono::Utc>>,
+    /// Optional path where this worktree is currently mounted
+    pub mounted_at: Option<String>,
+    /// Optional description of what this worktree is for
+    pub description: Option<String>,
 }
 
 /// Main commit structure that maps directly to TOML sections
@@ -124,6 +157,75 @@ pub struct MerkleInfo {
     pub tree_depth: u32,
 }
 
+impl Worktree {
+    /// Creates a new worktree with the given name and base commit
+    pub fn new(name: String, base_commit: String, description: Option<String>) -> Self {
+        let now = chrono::Utc::now();
+        Self {
+            worktree: WorktreeInfo {
+                name,
+                base_commit,
+                created: now,
+                last_modified: now,
+                last_committed: None,
+                mounted_at: None,
+                description,
+            },
+        }
+    }
+
+    /// Returns the name of this worktree
+    pub fn name(&self) -> &str {
+        &self.worktree.name
+    }
+
+    /// Returns the base commit ID
+    pub fn base_commit(&self) -> &str {
+        &self.worktree.base_commit
+    }
+
+    /// Returns whether this worktree is currently mounted
+    pub fn is_mounted(&self) -> bool {
+        self.worktree.mounted_at.is_some()
+    }
+
+    /// Returns the mount path if mounted
+    pub fn mount_path(&self) -> Option<&str> {
+        self.worktree.mounted_at.as_deref()
+    }
+
+    /// Sets the mount path for this worktree
+    pub fn set_mounted_at(&mut self, path: Option<String>) {
+        self.worktree.mounted_at = path;
+    }
+
+    /// Updates the last committed timestamp
+    pub fn mark_committed(&mut self) {
+        self.worktree.last_committed = Some(chrono::Utc::now());
+    }
+
+    /// Updates the last modified timestamp (only call when explicitly needed)
+    pub fn touch(&mut self) {
+        self.worktree.last_modified = chrono::Utc::now();
+    }
+
+    /// Returns whether this worktree has uncommitted changes by checking the upperdir
+    ///
+    /// This requires the upperdir path to be passed in since the worktree metadata
+    /// doesn't store filesystem paths directly
+    pub fn has_uncommitted_changes(&self, upperdir_path: &std::path::Path) -> bool {
+        if !upperdir_path.exists() {
+            return false; // No upperdir means no changes
+        }
+
+        // Check if upperdir has any files/directories
+        match std::fs::read_dir(upperdir_path) {
+            Ok(mut entries) => entries.next().is_some(), // Has at least one entry
+            Err(_) => false,                             // Can't read directory, assume no changes
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +239,63 @@ mod tests {
         // serialize to TOML
         let toml_str = toml::to_string(&commit).expect("Failed to serialize commit");
         println!("Serialized commit:\n{}", toml_str);
+    }
+
+    #[test]
+    fn test_worktree_creation() {
+        let worktree = Worktree::new(
+            "main".to_string(),
+            "abc123".to_string(),
+            Some("Main development branch".to_string()),
+        );
+
+        assert_eq!(worktree.name(), "main");
+        assert_eq!(worktree.base_commit(), "abc123");
+        assert!(!worktree.is_mounted());
+        assert_eq!(worktree.mount_path(), None);
+        assert_eq!(
+            worktree.worktree.description,
+            Some("Main development branch".to_string())
+        );
+    }
+
+    #[test]
+    fn test_worktree_mount_operations() {
+        let mut worktree = Worktree::new("feature".to_string(), "def456".to_string(), None);
+
+        // Initially not mounted
+        assert!(!worktree.is_mounted());
+
+        // Set mount path
+        worktree.set_mounted_at(Some("/tmp/mount".to_string()));
+        assert!(worktree.is_mounted());
+        assert_eq!(worktree.mount_path(), Some("/tmp/mount"));
+
+        // Unmount
+        worktree.set_mounted_at(None);
+        assert!(!worktree.is_mounted());
+        assert_eq!(worktree.mount_path(), None);
+    }
+
+    #[test]
+    fn test_worktree_uncommitted_changes() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let worktree = Worktree::new("test".to_string(), "xyz789".to_string(), None);
+
+        let temp_dir = TempDir::new().unwrap();
+        let upperdir = temp_dir.path().join("upperdir");
+
+        // Non-existent upperdir should return false
+        assert!(!worktree.has_uncommitted_changes(&upperdir));
+
+        // Empty upperdir should return false
+        fs::create_dir_all(&upperdir).unwrap();
+        assert!(!worktree.has_uncommitted_changes(&upperdir));
+
+        // Upperdir with files should return true
+        fs::write(upperdir.join("test.txt"), "content").unwrap();
+        assert!(worktree.has_uncommitted_changes(&upperdir));
     }
 }

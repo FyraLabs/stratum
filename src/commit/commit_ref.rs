@@ -1,5 +1,6 @@
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::util::parse_label;
 
@@ -25,6 +26,15 @@ impl From<&str> for StratumRef {
             StratumRef::Commit(s.to_string())
         } else {
             StratumRef::Tag(s.to_string())
+        }
+    }
+}
+
+impl fmt::Display for StratumRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StratumRef::Commit(id) => write!(f, "{}", id),
+            StratumRef::Tag(tag) => write!(f, "{}", tag),
         }
     }
 }

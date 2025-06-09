@@ -13,8 +13,8 @@ use crate::commit::StratumRef;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub enum StratumMountRef {
-    /// A writable HEAD with an upperdir
-    Head,
+    /// A writable worktree
+    Worktree(String),
     /// A read-only snapshot of a stratum
     Snapshot(StratumRef),
 }

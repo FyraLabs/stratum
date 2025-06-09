@@ -5,9 +5,9 @@
 //!
 //! This is similar to composefs-rs' `Repository` type.
 
-use std::path::Path;
-
 use crate::{commit::StratumRef, object::ObjectDatabase};
+use composefs::repository::Repository as ComposeFSRepo;
+use std::path::Path;
 
 pub struct Store {
     /// The path to the store's base directory, so we know where the store actually is
@@ -20,10 +20,15 @@ impl Store {
     const COMMITS_DIR: &'static str = "commits";
     const REFS_DIR: &'static str = "refs";
     const TAGS_DIR: &'static str = "tags";
+    const WORKTREES_DIR: &'static str = "worktrees";
 
-    // refs/<label>/head - persistent mutable upperdir for layering changes
-    const HEAD_UPPERDIR: &'static str = "head";
-    const HEAD_META_FILE: &'static str = "head.toml";
+    // Default worktree name
+    const DEFAULT_WORKTREE: &'static str = "main";
+
+    // Worktree subdirectories
+    const UPPERDIR: &'static str = "upperdir";
+    const WORKDIR: &'static str = "workdir";
+    const WORKTREE_META_FILE: &'static str = "meta.toml";
 
     const METADATA_FILE: &'static str = "metadata.toml";
     const COMMIT_FILE: &'static str = "commit.cfs";
@@ -67,18 +72,6 @@ impl Store {
         format!("{}/{}", self.ref_path(label), Self::TAGS_DIR)
     }
 
-    /// Returns the head upperdir mount path for a given ref
-    fn head_path(&self, label: &str) -> String {
-        // refs/<label>/head
-        std::fs::create_dir_all(self.ref_path(label)).ok();
-        format!("{}/{}", self.ref_path(label), Self::HEAD_UPPERDIR)
-    }
-
-    /// Returns the path to the head metadata file for a given ref
-    fn head_meta_path(&self, label: &str) -> String {
-        format!("{}/{}", self.head_path(label), Self::HEAD_META_FILE)
-    }
-
     /// Returns the path to the objects directory
     fn objects_path(&self) -> String {
         let path = format!("{}/{}", self.base_path, Self::OBJECTS_DIR);
@@ -99,17 +92,68 @@ impl Store {
         format!("{}/{tag}/{}", self.ref_path(label), Self::COMMIT_FILE)
     }
 
-    // todo: upperdir mounts and stuff
-    pub fn mount_ref(&self, sref: &StratumRef, mountpoint: &str) -> Result<(), String> {
+    /// Returns the path to the worktrees directory for a label
+    fn worktrees_path(&self, label: &str) -> String {
+        std::fs::create_dir_all(self.ref_path(label)).ok();
+        format!("{}/{}", self.ref_path(label), Self::WORKTREES_DIR)
+    }
+
+    /// Returns the path to a specific worktree
+    fn worktree_path(&self, label: &str, worktree: &str) -> String {
+        std::fs::create_dir_all(self.worktrees_path(label)).ok();
+        format!("{}/{}", self.worktrees_path(label), worktree)
+    }
+
+    /// Returns the path to a worktree's upperdir
+    fn worktree_upperdir(&self, label: &str, worktree: &str) -> String {
+        let worktree_path = self.worktree_path(label, worktree);
+        std::fs::create_dir_all(&worktree_path).ok();
+        format!("{}/{}", worktree_path, Self::UPPERDIR)
+    }
+
+    /// Returns the path to a worktree's workdir
+    fn worktree_workdir(&self, label: &str, worktree: &str) -> String {
+        let worktree_path = self.worktree_path(label, worktree);
+        std::fs::create_dir_all(&worktree_path).ok();
+        format!("{}/{}", worktree_path, Self::WORKDIR)
+    }
+
+    /// Returns the path to a worktree's metadata file
+    fn worktree_meta_path(&self, label: &str, worktree: &str) -> String {
+        format!(
+            "{}/{}",
+            self.worktree_path(label, worktree),
+            Self::WORKTREE_META_FILE
+        )
+    }
+
+    /// Mount a reference using native Rust composefs implementation
+    ///
+    /// # Arguments
+    /// * `sref` - The stratum reference to mount
+    /// * `mountpoint` - The path where to mount the filesystem
+    /// * `worktree` - Optional worktree name. If provided, the mount will be associated with this worktree
+    pub fn mount_ref(
+        &self,
+        sref: &StratumRef,
+        mountpoint: &str,
+        worktree: Option<&str>,
+    ) -> Result<(), String> {
         let cid = sref
             .resolve_commit_id(self)
             .map_err(|e| format!("Failed to resolve commit ID: {}", e))?;
 
+        let worktree_info = match worktree {
+            Some(wt) => format!(" (worktree: {})", wt),
+            None => String::new(),
+        };
+
         tracing::debug!(
-            "Mounting ref {:?} (commit: {}) at {}",
+            "Mounting ref {:?} (commit: {}) at {}{}",
             sref,
             cid,
-            mountpoint
+            mountpoint,
+            worktree_info
         );
 
         // Get the composefs file for this commit
@@ -128,29 +172,53 @@ impl Store {
             return Ok(());
         }
 
-        // Use mount command with composefs helper (more reliable than raw syscall)
+        // Use native Rust composefs mounting implementation
+        tracing::debug!("Using native Rust composefs mounting for {}", commit_file);
 
-        let mount_options = format!("basedir={}", self.objects_path());
-        
-        // todo: Re-implement this in Rust
-        let output = std::process::Command::new("mount")
-            .arg("-t")
-            .arg("composefs")
-            .arg("-o")
-            .arg(&mount_options)
-            .arg(&commit_file)
-            .arg(mountpoint)
-            .output()
-            .map_err(|e| format!("Failed to execute mount command: {}", e))?;
+        // Open the composefs image file
+        let image_file = std::fs::File::open(&commit_file)
+            .map_err(|e| format!("Failed to open composefs image {}: {}", commit_file, e))?;
 
-        if !output.status.success() {
-            return Err(format!(
-                "Mount failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
+        let source_name = {
+            if let Some(worktree) = worktree {
+                format!("stratum:{}+{})", sref, worktree)
+            } else {
+                format!("stratum:{}", sref)
+            }
+        };
 
-        tracing::info!("Successfully mounted {} at {}", cid, mountpoint);
+        // Create composefs configuration
+        let config = if let Some(wt) = worktree {
+            let upperdir = self.worktree_upperdir(&sref.to_string(), wt);
+            let workdir = self.worktree_workdir(&sref.to_string(), wt);
+            crate::mount::composefs::ComposeFsConfig::writable(
+                image_file.into(),
+                source_name.clone(),
+                std::path::PathBuf::from(upperdir),
+                Some(std::path::PathBuf::from(workdir)),
+            )
+        } else {
+            crate::mount::composefs::ComposeFsConfig::read_only(
+                image_file.into(),
+                source_name.clone(),
+            )
+        };
+
+        let config = config
+            .with_basedir(std::path::PathBuf::from(self.objects_path()))
+            .with_source_name(source_name);
+
+        // Mount using native implementation
+        tracing::debug!("Mounting composefs at {}", mountpoint);
+        crate::mount::composefs::mount_composefs_persistent_at(&config, Path::new(mountpoint))
+            .map_err(|e| format!("Failed to mount composefs: {}", e))?;
+
+        tracing::info!(
+            "Successfully mounted {} at {} using native implementation{}",
+            cid,
+            mountpoint,
+            worktree_info
+        );
         Ok(())
     }
 
@@ -175,25 +243,16 @@ impl Store {
         Ok(false)
     }
 
-    /// Unmount a composefs mount
+    /// Unmount a composefs mount using native Rust implementation
     pub fn unmount_ref(&self, mountpoint: &str) -> Result<(), String> {
         if !self.is_mounted(mountpoint)? {
             tracing::info!("Not mounted at {}", mountpoint);
             return Ok(());
         }
 
-        // Use umount command for consistency with mount approach
-        let output = std::process::Command::new("umount")
-            .arg(mountpoint)
-            .output()
-            .map_err(|e| format!("Failed to execute umount command: {}", e))?;
-
-        if !output.status.success() {
-            return Err(format!(
-                "Unmount failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
+        // Use native Rust composefs unmounting implementation
+        crate::mount::composefs::unmount_composefs_at(Path::new(mountpoint))
+            .map_err(|e| format!("Failed to unmount composefs: {}", e))?;
 
         tracing::info!("Successfully unmounted {}", mountpoint);
         Ok(())
@@ -392,40 +451,10 @@ impl Store {
         Ok(tags)
     }
 
-    /// Get or create the HEAD upperdir for layering changes
-    pub fn get_head_upperdir(&self, label: &str) -> Result<String, String> {
-        let head_path = self.head_path(label);
-        std::fs::create_dir_all(&head_path).map_err(|e| e.to_string())?;
-        Ok(head_path)
-    }
+    // === Worktree Management ===
+    // (Implementation to be added later)
 
-    /// Clear the HEAD upperdir (wipe uncommitted changes)
-    pub fn clear_head(&self, label: &str) -> Result<(), String> {
-        let head_path = self.head_path(label);
-        if Path::new(&head_path).exists() {
-            std::fs::remove_dir_all(&head_path).map_err(|e| e.to_string())?;
-            std::fs::create_dir_all(&head_path).map_err(|e| e.to_string())?;
-        }
-        tracing::info!("Cleared HEAD for label: {}", label);
-        Ok(())
-    }
-
-    /// Commit the current HEAD state (import HEAD directory as new commit)
-    pub fn commit_head(&self, label: &str) -> Result<String, String> {
-        let head_path = self.head_path(label);
-        if !Path::new(&head_path).exists() {
-            return Err("No HEAD directory to commit".to_string());
-        }
-
-        // Import the HEAD directory as a new commit
-        let commit_id = self.import_directory(label, &head_path, None)?;
-
-        // Optionally clear HEAD after commit
-        self.clear_head(label)?;
-
-        tracing::info!("Committed HEAD as: {}", commit_id);
-        Ok(commit_id)
-    }
+    //
 
     /// Import a bare directory on top of an existing commit (for layering/patches)
     /// This is useful for applying deltas, patches, or mods on top of existing commits
@@ -758,34 +787,31 @@ mod tests {
     }
 
     #[test]
-    fn test_head_operations() {
+    fn test_worktree_paths() {
         let temp_dir = TempDir::new().unwrap();
         let store_path = temp_dir.path().join("test_store");
         let store = Store::new(store_path.to_string_lossy().to_string());
 
-        // Get HEAD upperdir
-        let head_path = store.get_head_upperdir("myapp").unwrap();
-        assert!(Path::new(&head_path).exists());
+        // Test worktree path methods
+        let worktrees_path = store.worktrees_path("myapp");
+        let main_worktree_path = store.worktree_path("myapp", "main");
+        let upperdir_path = store.worktree_upperdir("myapp", "main");
+        let workdir_path = store.worktree_workdir("myapp", "main");
+        let meta_path = store.worktree_meta_path("myapp", "main");
 
-        // Create some files in HEAD
-        fs::write(Path::new(&head_path).join("work_file.txt"), "work content").unwrap();
+        // Verify path structure
+        assert!(worktrees_path.contains("refs/myapp/worktrees"));
+        assert!(main_worktree_path.contains("refs/myapp/worktrees/main"));
+        assert!(upperdir_path.contains("refs/myapp/worktrees/main/upperdir"));
+        assert!(workdir_path.contains("refs/myapp/worktrees/main/workdir"));
+        assert!(meta_path.contains("refs/myapp/worktrees/main/meta.toml"));
 
-        // Clear HEAD
-        store.clear_head("myapp").unwrap();
-        let entries: Vec<_> = fs::read_dir(&head_path).unwrap().collect();
-        assert_eq!(entries.len(), 0); // Should be empty
+        // Verify parent directories are created by the path methods
+        assert!(Path::new(&worktrees_path).exists());
+        assert!(Path::new(&main_worktree_path).exists());
 
-        // Add file again and commit HEAD
-        fs::write(
-            Path::new(&head_path).join("final_file.txt"),
-            "final content",
-        )
-        .unwrap();
-        let commit_id = store.commit_head("myapp").unwrap();
-        assert!(!commit_id.is_empty());
-
-        // Verify HEAD was cleared after commit
-        let entries: Vec<_> = fs::read_dir(&head_path).unwrap().collect();
-        assert_eq!(entries.len(), 0);
+        // Note: upperdir and workdir themselves aren't created by path methods,
+        // only their parent worktree directory is created
+        assert!(Path::new(&main_worktree_path).exists());
     }
 }
