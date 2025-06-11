@@ -200,7 +200,7 @@ impl Drop for TempOvlMount {
 }
 
 #[tracing::instrument(level = "trace", name = "fsync_dir")]
-fn fsync_dir(path: &Path) -> Result<()> {
+pub fn fsync_dir(path: &Path) -> Result<()> {
     tracing::trace!("running fsync");
     let file = std::fs::File::open(path)?;
     rustix::fs::fsync(&file)?;

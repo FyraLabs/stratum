@@ -5,7 +5,6 @@
 //!
 //! This is similar to composefs-rs' `Repository` type.
 
-use composefs::mount::FsHandle;
 use tempfile::TempDir;
 
 use crate::{
@@ -19,6 +18,25 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
 };
+
+pub fn fsync_all_walk(dir: &Path) -> io::Result<()> {
+    tracing::trace!("Running fsync() on {}", dir.display());
+    let walker = jwalk::WalkDir::new(dir);
+    for entry in walker {
+        let entry = entry?;
+        if let Some(parent) = entry.path().parent() {
+            {
+                let file = std::fs::File::open(entry.path())?;
+                rustix::fs::fsync(&file)?;
+            }
+            {
+                let parent_dir = std::fs::File::open(parent)?;
+                rustix::fs::fsync(&parent_dir)?;
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Copy a directory recursively, preserving all metadata including permissions,
 /// ownership, timestamps, and extended attributes.
@@ -291,6 +309,18 @@ impl Store {
 
     pub fn new(base_path: String) -> Self {
         std::fs::create_dir_all(&base_path).ok();
+
+        // Sync the base directory to ensure it's written to disk
+        if let Some(parent) = Path::new(&base_path).parent() {
+            if let Err(e) = fsync_all_walk(parent) {
+                tracing::warn!(
+                    "Failed to fsync store base parent directory {}: {}",
+                    parent.display(),
+                    e
+                );
+            }
+        }
+
         let object_database =
             ObjectDatabase::new(&base_path).expect("Failed to initialize object database");
         let state_manager = StateManager::new().expect("Failed to initialize state manager");
@@ -308,6 +338,18 @@ impl Store {
     pub fn temp_path(&self) -> String {
         let path = format!("{}/{}", self.base_path, Self::TEMP_DIR);
         std::fs::create_dir_all(&path).ok();
+
+        // Sync the temp directory to ensure it's written to disk
+        if let Some(parent) = Path::new(&path).parent() {
+            if let Err(e) = fsync_all_walk(parent) {
+                tracing::warn!(
+                    "Failed to fsync temp parent directory {}: {}",
+                    parent.display(),
+                    e
+                );
+            }
+        }
+
         path
     }
 
@@ -423,6 +465,17 @@ impl Store {
         // Create mountpoint if it doesn't exist
         std::fs::create_dir_all(mountpoint)
             .map_err(|e| format!("Failed to create mountpoint {}: {}", mountpoint, e))?;
+
+        // Sync the mountpoint parent directory to ensure it's written to disk
+        if let Some(parent) = Path::new(mountpoint).parent() {
+            if let Err(e) = fsync_all_walk(parent) {
+                tracing::warn!(
+                    "Failed to fsync mountpoint parent directory {}: {}",
+                    parent.display(),
+                    e
+                );
+            }
+        }
 
         // Canonicalize the mount path for consistent storage
         let canonical_mountpoint = std::fs::canonicalize(mountpoint)
@@ -588,6 +641,17 @@ impl Store {
         // Create mountpoint if it doesn't exist
         std::fs::create_dir_all(mountpoint)
             .map_err(|e| format!("Failed to create mountpoint {}: {}", mountpoint, e))?;
+
+        // Sync the mountpoint parent directory to ensure it's written to disk
+        if let Some(parent) = Path::new(mountpoint).parent() {
+            if let Err(e) = fsync_all_walk(parent) {
+                tracing::warn!(
+                    "Failed to fsync ephemeral mountpoint parent directory {}: {}",
+                    parent.display(),
+                    e
+                );
+            }
+        }
 
         // Get the commit ID for the stratum reference
         let cid = sref
@@ -828,6 +892,17 @@ impl Store {
         // Ensure the base path exists
         std::fs::create_dir_all(&self.base_path).map_err(|e| e.to_string())?;
 
+        // Sync the base path parent to ensure it's written to disk
+        if let Some(parent) = Path::new(&self.base_path).parent() {
+            if let Err(e) = fsync_all_walk(parent) {
+                tracing::warn!(
+                    "Failed to fsync store base parent directory {}: {}",
+                    parent.display(),
+                    e
+                );
+            }
+        }
+
         // Collect file data for merkle tree
         let file_chunks = self.collect_file_chunks(dir_path)?;
 
@@ -855,6 +930,17 @@ impl Store {
         // Create commit directory using commit ID
         let commit_path = self.commit_path(&commit_id);
         std::fs::create_dir_all(&commit_path).map_err(|e| e.to_string())?;
+
+        // Sync the commit directory to ensure it's written to disk
+        if let Some(parent) = Path::new(&commit_path).parent() {
+            if let Err(e) = fsync_all_walk(parent) {
+                tracing::warn!(
+                    "Failed to fsync commit parent directory {}: {}",
+                    parent.display(),
+                    e
+                );
+            }
+        }
 
         // Create the commit object
         let commit = crate::commit::Commit {
@@ -887,10 +973,24 @@ impl Store {
 
         // Store commit metadata
         self.store_commit(&commit_id, &commit)?;
+
+        // Sync the commit directory after writing metadata
+        if let Err(e) = fsync_all_walk(Path::new(&commit_path)) {
+            tracing::warn!("Failed to fsync commit directory {}: {}", commit_path, e);
+        }
         // Register objects in the object database
 
         // Ensure ref directory exists
         std::fs::create_dir_all(self.ref_path(label)).map_err(|e| e.to_string())?;
+
+        // Sync the ref directory to ensure it's written to disk
+        if let Err(e) = fsync_all_walk(Path::new(&self.ref_path(label))) {
+            tracing::warn!(
+                "Failed to fsync ref directory {}: {}",
+                self.ref_path(label),
+                e
+            );
+        }
 
         // Create the main worktree if this is the first commit (no parent)
 
@@ -1033,6 +1133,17 @@ impl Store {
         std::fs::create_dir_all(&workdir)
             .map_err(|e| format!("Failed to create workdir {}: {}", workdir, e))?;
 
+        // Sync the worktree directories to ensure they're written to disk
+        if let Some(parent) = Path::new(&upperdir).parent() {
+            if let Err(e) = fsync_all_walk(parent) {
+                tracing::warn!(
+                    "Failed to fsync worktree parent directory {}: {}",
+                    parent.display(),
+                    e
+                );
+            }
+        }
+
         // Create worktree metadata
         let worktree = crate::commit::Worktree::new(
             worktree_name.to_string(),
@@ -1042,6 +1153,17 @@ impl Store {
 
         // Save worktree metadata
         self.save_worktree_metadata(label, &worktree)?;
+
+        // Sync the worktree metadata directory
+        if let Some(parent) = Path::new(&self.worktree_meta_path(label, worktree_name)).parent() {
+            if let Err(e) = fsync_all_walk(parent) {
+                tracing::warn!(
+                    "Failed to fsync worktree metadata directory {}: {}",
+                    parent.display(),
+                    e
+                );
+            }
+        }
 
         tracing::info!(
             "Created worktree {}:{} based on commit {}",
@@ -1155,6 +1277,17 @@ impl Store {
         }
 
         std::fs::write(&meta_path, toml_content).map_err(|e| e.to_string())?;
+
+        // Sync the parent directory to ensure the metadata file is written to disk
+        if let Some(parent) = Path::new(&meta_path).parent() {
+            if let Err(e) = fsync_all_walk(parent) {
+                tracing::warn!(
+                    "Failed to fsync worktree metadata parent directory {}: {}",
+                    parent.display(),
+                    e
+                );
+            }
+        }
 
         tracing::debug!("Saved worktree metadata at: {}", meta_path);
         Ok(())
@@ -1312,6 +1445,26 @@ impl Store {
                     std::fs::create_dir_all(&work_dir)
                         .map_err(|e| format!("Failed to create overlayfs workdir: {}", e))?;
 
+                    // Sync the parent directories to ensure they're written to disk
+                    if let Some(parent) = mount_point.parent() {
+                        if let Err(e) = fsync_all_walk(parent) {
+                            tracing::warn!(
+                                "Failed to fsync overlayfs mount parent directory {}: {}",
+                                parent.display(),
+                                e
+                            );
+                        }
+                    }
+                    if let Some(parent) = work_dir.parent() {
+                        if let Err(e) = fsync_all_walk(parent) {
+                            tracing::warn!(
+                                "Failed to fsync overlayfs work parent directory {}: {}",
+                                parent.display(),
+                                e
+                            );
+                        }
+                    }
+
                     // Use the original directory as the upperdir directly
                     // without creating any extra directories or copying files
                     tracing::debug!("Using original directory as upperdir: {}", dir_path);
@@ -1339,6 +1492,35 @@ impl Store {
                     std::fs::create_dir_all(&work_dir)
                         .map_err(|e| format!("Failed to create overlayfs workdir: {}", e))?;
 
+                    // Sync the parent directories to ensure they're written to disk
+                    if let Some(parent) = mount_point.parent() {
+                        if let Err(e) = fsync_all_walk(parent) {
+                            tracing::warn!(
+                                "Failed to fsync fallback overlayfs mount parent directory {}: {}",
+                                parent.display(),
+                                e
+                            );
+                        }
+                    }
+                    if let Some(parent) = upper_dir.parent() {
+                        if let Err(e) = fsync_all_walk(parent) {
+                            tracing::warn!(
+                                "Failed to fsync fallback overlayfs upper parent directory {}: {}",
+                                parent.display(),
+                                e
+                            );
+                        }
+                    }
+                    if let Some(parent) = work_dir.parent() {
+                        if let Err(e) = fsync_all_walk(parent) {
+                            tracing::warn!(
+                                "Failed to fsync fallback overlayfs work parent directory {}: {}",
+                                parent.display(),
+                                e
+                            );
+                        }
+                    }
+
                     // Need to copy in this case since we're on different filesystems
                     tracing::debug!(
                         "Copying {} to temporary upperdir {}",
@@ -1347,6 +1529,15 @@ impl Store {
                     );
                     copy_dir_all(dir_path, &upper_dir)
                         .map_err(|e| format!("Failed to copy to temporary upperdir: {}", e))?;
+
+                    // Sync the copied directory to ensure it's written to disk
+                    if let Err(e) = fsync_all_walk(&upper_dir) {
+                        tracing::warn!(
+                            "Failed to fsync copied upperdir {}: {}",
+                            upper_dir.display(),
+                            e
+                        );
+                    }
 
                     (tmp_dir, upper_dir, work_dir, mount_point)
                 }
@@ -1484,6 +1675,8 @@ impl Store {
 
     /// Create composefs file for a commit
     fn create_composefs_file(&self, commit_id: &str, dir_path: &str) -> Result<String, String> {
+        fsync_all_walk(Path::new(dir_path))
+            .map_err(|e| format!("Failed to fsync directory {}: {}", dir_path, e))?;
         let commit_file = format!("{}/commit.cfs", self.commit_path(commit_id));
 
         let output = std::process::Command::new("mkcomposefs")
@@ -1499,6 +1692,12 @@ impl Store {
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
+
+        // fsync_all_walk(Path::new(&commit_file))
+        // .map_err(|e| format!("Failed to fsync composefs file {}: {}", commit_file, e))?;
+
+        fsync_all_walk(Path::new(&self.objects_path()))
+            .map_err(|e| format!("Failed to fsync composefs file {}: {}", commit_file, e))?;
 
         tracing::debug!("Created composefs file: {}", commit_file);
         Ok(commit_file)
