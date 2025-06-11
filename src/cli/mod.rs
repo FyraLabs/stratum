@@ -70,7 +70,7 @@ impl Cli {
             Commands::Import {
                 directory,
                 name,
-                bare: _,
+                bare: _, // todo: handle bare import
                 patch,
             } => {
                 if !directory.is_dir() {
@@ -89,13 +89,19 @@ impl Cli {
                 // Import the directory and get the commit ID
                 let parent_commit = if let Some(patch_ref) = patch {
                     let commit_id = patch_ref.resolve_commit_id(&store)?;
-                    store.import_directory(
+                    store.union_patch_commit(
                         &stratum_label,
                         &directory.to_string_lossy(),
-                        Some(&commit_id),
+                        &commit_id,
+                        false
                     )?
                 } else {
-                    store.import_directory(&stratum_label, &directory.to_string_lossy(), None)?
+                    store.commit_directory_bare(
+                        &stratum_label,
+                        &directory.to_string_lossy(),
+                        None,
+                        false,
+                    )?
                 };
 
                 let commit_id = parent_commit;
@@ -171,10 +177,11 @@ impl Cli {
                 };
 
                 store.mount_ref(&stratum_ref, &mount_path, worktree)
-            },
+            }
             Commands::Worktree(command) => {
                 // Delegate to the worktree command handler
-                command.execute(&store)
+                command
+                    .execute(&store)
                     .map_err(|e| format!("Worktree command failed: {}", e))
             }
         }

@@ -5,8 +5,38 @@
 //!
 //! This is similar to composefs-rs' `Repository` type.
 
-use crate::{commit::{StratumRef, Worktree}, object::ObjectDatabase, state::StateManager};
-use std::path::{Path, PathBuf};
+use composefs::mount::FsHandle;
+
+use crate::{
+    commit::{StratumRef, Worktree},
+    mount::EphemeralMount,
+    object::ObjectDatabase,
+    state::StateManager,
+};
+use std::{
+    collections::HashSet,
+    fs, io,
+    path::{Path, PathBuf},
+};
+
+/// Copy a directory recursively.
+fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
+    fs::create_dir_all(&dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let path = entry.path();
+        let filename = path.file_name().unwrap();
+        let target = dst.as_ref().join(filename);
+
+        if ty.is_dir() {
+            copy_dir_all(&path, &target)?;
+        } else {
+            fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
 
 pub struct Store {
     /// The path to the store's base directory, so we know where the store actually is
@@ -284,6 +314,53 @@ impl Store {
         Ok(())
     }
 
+    pub fn mount_ref_ephemeral(
+        &self,
+        sref: &StratumRef,
+        mountpoint: &str,
+    ) -> Result<crate::mount::FsHandle, String> {
+        // Deny worktree mounts for ephemeral mounts
+        if let StratumRef::Worktree { .. } = sref {
+            return Err("Ephemeral mounts do not support worktrees".to_string());
+        }
+
+        // Create mountpoint if it doesn't exist
+        std::fs::create_dir_all(mountpoint)
+            .map_err(|e| format!("Failed to create mountpoint {}: {}", mountpoint, e))?;
+
+        // Get the commit ID for the stratum reference
+        let cid = sref
+            .resolve_commit_id(self)
+            .map_err(|e| format!("Failed to resolve commit ID: {}", e))?;
+
+        // Get the composefs file for this commit
+        let commit_file = format!("{}/commit.cfs", self.commit_path(&cid));
+        if !Path::new(&commit_file).exists() {
+            return Err(format!("Commit file not found: {}", commit_file));
+        }
+
+        // Open the composefs image file
+        let image_file = std::fs::File::open(&commit_file)
+            .map_err(|e| format!("Failed to open composefs image {}: {}", commit_file, e))?;
+
+        // Create composefs configuration for ephemeral mount
+        let config = crate::mount::composefs::ComposeFsConfig::read_only(
+            image_file.into(),
+            sref.to_string(),
+        );
+
+        let config = config
+            .with_basedir(std::path::PathBuf::from(self.objects_path()))
+            .with_source_name(sref.to_string());
+
+        // Mount using native implementation
+        tracing::debug!("Mounting read-only composefs at {}", mountpoint);
+        let handle = crate::mount::composefs::mount_composefs_at(&config, Path::new(mountpoint))
+            .map_err(|e| format!("Failed to mount composefs: {}", e))?;
+
+        Ok(handle)
+    }
+
     /// Check if a path is already mounted
     fn is_mounted(&self, path: &str) -> Result<bool, String> {
         let mounts = std::fs::read_to_string("/proc/mounts")
@@ -402,11 +479,12 @@ impl Store {
     ///
     /// # Returns
     /// Returns the commit ID (metadata hash)
-    pub fn import_directory(
+    pub fn commit_directory_bare(
         &self,
         label: &str,
         dir_path: &str,
         parent_commit: Option<&str>,
+        transient: bool,
     ) -> Result<String, String> {
         // Ensure the base path exists
         std::fs::create_dir_all(&self.base_path).map_err(|e| e.to_string())?;
@@ -463,7 +541,10 @@ impl Store {
 
         // Create composefs file in commit directory
         let file = self.create_composefs_file(&commit_id, dir_path)?;
-        self.register_objects(&commit_id, &file)?;
+
+        if !transient {
+            self.register_objects(&commit_id, &file)?;
+        }
 
         // Store commit metadata
         self.store_commit(&commit_id, &commit)?;
@@ -473,7 +554,8 @@ impl Store {
         std::fs::create_dir_all(self.ref_path(label)).map_err(|e| e.to_string())?;
 
         // Create the main worktree if this is the first commit (no parent)
-        if parent_commit.is_none() {
+
+        if !transient && parent_commit.is_none() {
             self.ensure_main_worktree(label, &commit_id)?;
             tracing::debug!(
                 "Created main worktree for new stratum {}:{}",
@@ -825,21 +907,133 @@ impl Store {
 
     // == End Worktree Management ==
 
-    /// Import a bare directory on top of an existing commit (for layering/patches)
-    /// This is useful for applying deltas, patches, or mods on top of existing commits
-    pub fn import_bare(
+    /// Import a bare directory as a new commit on top of an existing base commit
+    ///
+    /// This is used for creating a union commit that layers a new directory.
+    /// Or merging multiple commits into a new one.
+    pub fn union_patch_commit(
         &self,
         label: &str,
-        dir_path: &str,
+        dir_path: &str, // the upperdir to patch on top
         base_commit: &str,
+        transient: bool,
     ) -> Result<String, String> {
         // Verify the base commit exists
         if !self.commit_exists(base_commit) {
             return Err(format!("Base commit {} does not exist", base_commit));
         }
 
-        // Import the bare directory as a new commit with the base as parent
-        let commit_id = self.import_directory(label, dir_path, Some(base_commit))?;
+        tracing::info!(
+            "Creating union patch commit for label: {}, base commit: {}, from dir: {}",
+            label,
+            base_commit,
+            dir_path
+        );
+
+        // Try to create temporary directories on the same filesystem as the source directory
+        // This avoids copying large files into RAM
+        let dir_path_buf = Path::new(dir_path);
+        let parent_dir = dir_path_buf.parent().unwrap_or(Path::new("/tmp"));
+
+        // First try creating temporary directory adjacent to the source directory
+        let (ovl_tmp, temp_upperdir, overlayfs_workdir, overlayfs_mountpoint) =
+            match tempfile::tempdir_in(parent_dir) {
+                Ok(tmp_dir) => {
+                    tracing::debug!(
+                        "Created temporary directory on the same filesystem as the source: {}",
+                        tmp_dir.path().display()
+                    );
+
+                    // Create just the necessary subdirectories
+                    let mount_point = tmp_dir.path().join("overlayfs_mount");
+                    let work_dir = tmp_dir.path().join("workdir");
+
+                    std::fs::create_dir_all(&mount_point)
+                        .map_err(|e| format!("Failed to create overlayfs mountpoint: {}", e))?;
+                    std::fs::create_dir_all(&work_dir)
+                        .map_err(|e| format!("Failed to create overlayfs workdir: {}", e))?;
+
+                    // Use the original directory as the upperdir directly
+                    // without creating any extra directories or copying files
+                    tracing::debug!("Using original directory as upperdir: {}", dir_path);
+                    (tmp_dir, dir_path_buf.to_path_buf(), work_dir, mount_point)
+                }
+                Err(e) => {
+                    // Fall back to the original approach with copying if creating tempdir in parent fails
+                    tracing::warn!(
+                        "Failed to create temporary directory adjacent to source, falling back to system temp: {}",
+                        e
+                    );
+
+                    let tmp_dir = tempfile::tempdir().map_err(|e| {
+                        format!("Failed to create temporary overlayfs mount: {}", e)
+                    })?;
+
+                    let mount_point = tmp_dir.path().join("overlayfs_mount");
+                    let upper_dir = tmp_dir.path().join("upperdir");
+                    let work_dir = tmp_dir.path().join("workdir");
+
+                    std::fs::create_dir_all(&mount_point)
+                        .map_err(|e| format!("Failed to create overlayfs mountpoint: {}", e))?;
+                    std::fs::create_dir_all(&upper_dir)
+                        .map_err(|e| format!("Failed to create temporary upperdir: {}", e))?;
+                    std::fs::create_dir_all(&work_dir)
+                        .map_err(|e| format!("Failed to create overlayfs workdir: {}", e))?;
+
+                    // Need to copy in this case since we're on different filesystems
+                    tracing::debug!(
+                        "Copying {} to temporary upperdir {}",
+                        dir_path,
+                        upper_dir.display()
+                    );
+                    copy_dir_all(dir_path, &upper_dir)
+                        .map_err(|e| format!("Failed to copy to temporary upperdir: {}", e))?;
+
+                    (tmp_dir, upper_dir, work_dir, mount_point)
+                }
+            };
+
+        let commit_id = {
+            let base_sref = StratumRef::Commit(base_commit.to_string());
+            let basecommit_mountpoint = tempfile::tempdir().map_err(|e| {
+                format!("Failed to create temporary mountpoint for base commit: {e}")
+            })?;
+
+            tracing::debug!(
+                "Mounting base commit {} at {}",
+                base_commit,
+                basecommit_mountpoint.path().to_string_lossy()
+            );
+            // this will be dropped after the commit is created
+            let _base_commit_mount = self
+                .mount_ref_ephemeral(&base_sref, &basecommit_mountpoint.path().to_string_lossy())
+                .map_err(|e| format!("Failed to mount base commit {base_commit}: {e}"))?;
+
+            tracing::debug!(
+                "Creating overlayfs mount at {} with base commit {}",
+                overlayfs_mountpoint.to_string_lossy(),
+                base_commit
+            );
+            let ovl_mount = crate::mount::TempOvlMount::new(
+                overlayfs_mountpoint,
+                HashSet::from([basecommit_mountpoint.path().to_path_buf()]),
+                temp_upperdir,
+                Some(overlayfs_workdir),
+            );
+
+            ovl_mount
+                .mount()
+                .map_err(|e| format!("Failed to mount overlayfs: {}", e))?;
+
+            // Import the overlayfs mountpoint as a new commit with the base as parent
+            // This will capture both the base commit and the patched upperdir content
+            self.commit_directory_bare(
+                label,
+                &ovl_mount.get_mountpoint().to_string_lossy(),
+                Some(base_commit),
+                transient,
+            )?
+        };
 
         tracing::info!("Imported bare directory on top of commit {}", base_commit);
         tracing::info!("New commit: {}", commit_id);
@@ -1139,7 +1333,7 @@ mod tests {
 
         // Import creates a commit
         let commit_id = store
-            .import_directory("myapp", &source_path.to_string_lossy(), None)
+            .commit_directory_bare("myapp", &source_path.to_string_lossy(), None, false)
             .unwrap();
 
         assert!(!commit_id.is_empty());
