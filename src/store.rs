@@ -5,14 +5,14 @@
 //!
 //! This is similar to composefs-rs' `Repository` type.
 
-use crate::{commit::StratumRef, object::ObjectDatabase};
-use composefs::repository::Repository as ComposeFSRepo;
-use std::path::Path;
+use crate::{commit::{StratumRef, Worktree}, object::ObjectDatabase, state::StateManager};
+use std::path::{Path, PathBuf};
 
 pub struct Store {
     /// The path to the store's base directory, so we know where the store actually is
     pub base_path: String,
     object_database: ObjectDatabase,
+    state_manager: StateManager,
 }
 
 impl Store {
@@ -37,9 +37,11 @@ impl Store {
         std::fs::create_dir_all(&base_path).ok();
         let object_database =
             ObjectDatabase::new(&base_path).expect("Failed to initialize object database");
+        let state_manager = StateManager::new().expect("Failed to initialize state manager");
         Store {
             base_path,
             object_database,
+            state_manager,
         }
     }
 
@@ -132,7 +134,7 @@ impl Store {
     /// # Arguments
     /// * `sref` - The stratum reference to mount
     /// * `mountpoint` - The path where to mount the filesystem
-    /// * `worktree` - Optional worktree name. If provided, the mount will be associated with this worktree
+    /// * `worktree` - Optional worktree name. If provided, creates writable mount with upperdir. If None, creates read-only mount.
     pub fn mount_ref(
         &self,
         sref: &StratumRef,
@@ -142,25 +144,6 @@ impl Store {
         let cid = sref
             .resolve_commit_id(self)
             .map_err(|e| format!("Failed to resolve commit ID: {}", e))?;
-
-        let worktree_info = match worktree {
-            Some(wt) => format!(" (worktree: {})", wt),
-            None => String::new(),
-        };
-
-        tracing::debug!(
-            "Mounting ref {:?} (commit: {}) at {}{}",
-            sref,
-            cid,
-            mountpoint,
-            worktree_info
-        );
-
-        // Get the composefs file for this commit
-        let commit_file = format!("{}/commit.cfs", self.commit_path(&cid));
-        if !Path::new(&commit_file).exists() {
-            return Err(format!("Commit file not found: {}", commit_file));
-        }
 
         // Create mountpoint if it doesn't exist
         std::fs::create_dir_all(mountpoint)
@@ -172,53 +155,132 @@ impl Store {
             return Ok(());
         }
 
-        // Use native Rust composefs mounting implementation
-        tracing::debug!("Using native Rust composefs mounting for {}", commit_file);
+        // Get the composefs file for this commit
+        let commit_file = format!("{}/commit.cfs", self.commit_path(&cid));
+        if !Path::new(&commit_file).exists() {
+            return Err(format!("Commit file not found: {}", commit_file));
+        }
 
         // Open the composefs image file
         let image_file = std::fs::File::open(&commit_file)
             .map_err(|e| format!("Failed to open composefs image {}: {}", commit_file, e))?;
 
-        let source_name = {
-            if let Some(worktree) = worktree {
-                format!("stratum:{}+{})", sref, worktree)
-            } else {
-                format!("stratum:{}", sref)
+        // Extract label for source name construction and worktree operations
+        let label = match sref {
+            StratumRef::Worktree { label, .. } => label,
+            _ => &sref.to_string(),
+        };
+
+        match worktree {
+            Some(worktree_name) => {
+                // Writable mount with worktree upperdir
+                tracing::debug!(
+                    "Mounting ref {:?} (commit: {}) at {} with worktree: {}",
+                    sref,
+                    cid,
+                    mountpoint,
+                    worktree_name
+                );
+
+                // Ensure the worktree exists, creating main worktree if it doesn't exist
+                if worktree_name == Self::DEFAULT_WORKTREE {
+                    self.ensure_main_worktree(label, &cid)?;
+                } else if !self.worktree_exists(label, worktree_name) {
+                    return Err(format!(
+                        "Worktree {}:{} does not exist",
+                        label, worktree_name
+                    ));
+                }
+
+                let source_name = format!("stratum:{}+{}", label, worktree_name);
+
+                // Create composefs configuration with worktree upperdir
+                let upperdir = self.worktree_upperdir(label, worktree_name);
+                let workdir = self.worktree_workdir(label, worktree_name);
+                let config = crate::mount::composefs::ComposeFsConfig::writable(
+                    image_file.into(),
+                    source_name.clone(),
+                    std::path::PathBuf::from(upperdir),
+                    Some(std::path::PathBuf::from(workdir)),
+                );
+
+                let config = config
+                    .with_basedir(std::path::PathBuf::from(self.objects_path()))
+                    .with_source_name(source_name);
+
+                // Mount using native implementation
+                tracing::debug!("Mounting writable composefs at {}", mountpoint);
+                crate::mount::composefs::mount_composefs_persistent_at(
+                    &config,
+                    Path::new(mountpoint),
+                )
+                .map_err(|e| format!("Failed to mount composefs: {}", e))?;
+
+                // Update state manager with mount information
+                let mounted_stratum = crate::state::MountedStratum {
+                    stratum_ref: crate::state::StratumMountRef::Worktree {
+                        label: sref.to_string(),
+                        worktree: worktree_name.to_string(),
+                    },
+                    mount_point: PathBuf::from(mountpoint),
+                    read_only: false, // Worktrees are always writable
+                };
+                self.state_manager
+                    .add_mount(PathBuf::from(mountpoint), mounted_stratum)?;
+
+                tracing::info!(
+                    "Successfully mounted {} at {} using native implementation (worktree: {})",
+                    cid,
+                    mountpoint,
+                    worktree_name
+                );
             }
-        };
+            None => {
+                // Read-only mount without worktree
+                tracing::debug!(
+                    "Mounting ref {:?} (commit: {}) at {} as read-only",
+                    sref,
+                    cid,
+                    mountpoint
+                );
 
-        // Create composefs configuration
-        let config = if let Some(wt) = worktree {
-            let upperdir = self.worktree_upperdir(&sref.to_string(), wt);
-            let workdir = self.worktree_workdir(&sref.to_string(), wt);
-            crate::mount::composefs::ComposeFsConfig::writable(
-                image_file.into(),
-                source_name.clone(),
-                std::path::PathBuf::from(upperdir),
-                Some(std::path::PathBuf::from(workdir)),
-            )
-        } else {
-            crate::mount::composefs::ComposeFsConfig::read_only(
-                image_file.into(),
-                source_name.clone(),
-            )
-        };
+                let source_name = format!("stratum:{}", sref);
 
-        let config = config
-            .with_basedir(std::path::PathBuf::from(self.objects_path()))
-            .with_source_name(source_name);
+                // Create read-only composefs configuration
+                let config = crate::mount::composefs::ComposeFsConfig::read_only(
+                    image_file.into(),
+                    source_name.clone(),
+                );
 
-        // Mount using native implementation
-        tracing::debug!("Mounting composefs at {}", mountpoint);
-        crate::mount::composefs::mount_composefs_persistent_at(&config, Path::new(mountpoint))
-            .map_err(|e| format!("Failed to mount composefs: {}", e))?;
+                let config = config
+                    .with_basedir(std::path::PathBuf::from(self.objects_path()))
+                    .with_source_name(source_name);
 
-        tracing::info!(
-            "Successfully mounted {} at {} using native implementation{}",
-            cid,
-            mountpoint,
-            worktree_info
-        );
+                // Mount using native implementation
+                tracing::debug!("Mounting read-only composefs at {}", mountpoint);
+                crate::mount::composefs::mount_composefs_persistent_at(
+                    &config,
+                    Path::new(mountpoint),
+                )
+                .map_err(|e| format!("Failed to mount composefs: {}", e))?;
+
+                // Update state manager with mount information
+                let mounted_stratum = crate::state::MountedStratum {
+                    stratum_ref: crate::state::StratumMountRef::Snapshot(sref.clone()),
+                    mount_point: PathBuf::from(mountpoint),
+                    read_only: true, // Read-only snapshots
+                };
+                self.state_manager
+                    .add_mount(PathBuf::from(mountpoint), mounted_stratum)?;
+
+                tracing::info!(
+                    "Successfully mounted {} at {} using native implementation (read-only)",
+                    cid,
+                    mountpoint
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -243,6 +305,30 @@ impl Store {
         Ok(false)
     }
 
+    /// List all ref names in the store
+    pub fn list_all_refs(&self) -> Result<Vec<String>, String> {
+        let refs_path = format!("{}/{}", self.base_path, Self::REFS_DIR);
+
+        if !Path::new(&refs_path).exists() {
+            return Ok(Vec::new());
+        }
+
+        let entries = std::fs::read_dir(&refs_path).map_err(|e| e.to_string())?;
+
+        let mut refs = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+
+            if path.is_dir() {
+                refs.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+
+        refs.sort();
+        Ok(refs)
+    }
+
     /// Unmount a composefs mount using native Rust implementation
     pub fn unmount_ref(&self, mountpoint: &str) -> Result<(), String> {
         if !self.is_mounted(mountpoint)? {
@@ -250,9 +336,24 @@ impl Store {
             return Ok(());
         }
 
+        // Safety check: verify the mount is registered in state manager
+        let state = self.state_manager.load_state()?;
+        let mount_path = Path::new(mountpoint);
+
+        if !state.mounts.contains_key(mount_path) {
+            tracing::warn!(
+                "Mount at {} not found in state manager, but appears to be mounted",
+                mountpoint
+            );
+            return Err(format!("Mount at {} is not managed by stratum", mountpoint));
+        }
+
         // Use native Rust composefs unmounting implementation
         crate::mount::composefs::unmount_composefs_at(Path::new(mountpoint))
             .map_err(|e| format!("Failed to unmount composefs: {}", e))?;
+
+        // Remove mount from state manager
+        self.state_manager.remove_mount(Path::new(mountpoint))?;
 
         tracing::info!("Successfully unmounted {}", mountpoint);
         Ok(())
@@ -371,6 +472,16 @@ impl Store {
         // Ensure ref directory exists
         std::fs::create_dir_all(self.ref_path(label)).map_err(|e| e.to_string())?;
 
+        // Create the main worktree if this is the first commit (no parent)
+        if parent_commit.is_none() {
+            self.ensure_main_worktree(label, &commit_id)?;
+            tracing::debug!(
+                "Created main worktree for new stratum {}:{}",
+                label,
+                commit_id
+            );
+        }
+
         Ok(commit_id)
     }
 
@@ -449,12 +560,270 @@ impl Store {
 
         tags.sort();
         Ok(tags)
+    } // === Worktree Management ===
+
+    /// Create a new worktree based on a commit
+    ///
+    /// This creates the worktree directory structure and metadata file.
+    /// The worktree allows mutable changes on top of the base commit.
+    pub fn create_worktree(
+        &self,
+        label: &str,
+        worktree_name: &str,
+        base_commit: &str,
+        description: Option<String>,
+    ) -> Result<(), String> {
+        // Verify the base commit exists
+        if !self.commit_exists(base_commit) {
+            return Err(format!("Base commit {} does not exist", base_commit));
+        }
+
+        // Check if worktree already exists
+        let meta_path = self.worktree_meta_path(label, worktree_name);
+        if Path::new(&meta_path).exists() {
+            return Err(format!(
+                "Worktree {}:{} already exists",
+                label, worktree_name
+            ));
+        }
+
+        // Create worktree directories
+        let upperdir = self.worktree_upperdir(label, worktree_name);
+        let workdir = self.worktree_workdir(label, worktree_name);
+
+        std::fs::create_dir_all(&upperdir)
+            .map_err(|e| format!("Failed to create upperdir {}: {}", upperdir, e))?;
+
+        std::fs::create_dir_all(&workdir)
+            .map_err(|e| format!("Failed to create workdir {}: {}", workdir, e))?;
+
+        // Create worktree metadata
+        let worktree = crate::commit::Worktree::new(
+            worktree_name.to_string(),
+            base_commit.to_string(),
+            description,
+        );
+
+        // Save worktree metadata
+        self.save_worktree_metadata(label, &worktree)?;
+
+        tracing::info!(
+            "Created worktree {}:{} based on commit {}",
+            label,
+            worktree_name,
+            base_commit
+        );
+
+        Ok(())
     }
 
-    // === Worktree Management ===
-    // (Implementation to be added later)
+    /// Create the default 'main' worktree if it doesn't exist
+    ///
+    /// This ensures that every label has at least a main worktree to work with.
+    pub fn ensure_main_worktree(&self, label: &str, base_commit: &str) -> Result<(), String> {
+        if !self.worktree_exists(label, Self::DEFAULT_WORKTREE) {
+            self.create_worktree(
+                label,
+                Self::DEFAULT_WORKTREE,
+                base_commit,
+                Some("Default main worktree".to_string()),
+            )?;
+        }
+        Ok(())
+    }
 
-    //
+    /// Check if a worktree exists
+    pub fn worktree_exists(&self, label: &str, worktree_name: &str) -> bool {
+        Path::new(&self.worktree_meta_path(label, worktree_name)).exists()
+    }
+
+    /// List all worktrees for a label
+    pub fn list_worktrees(&self, label: &str) -> Result<Vec<(String, Worktree)>, String> {
+        let worktrees_path = self.worktrees_path(label);
+
+        if !Path::new(&worktrees_path).exists() {
+            return Ok(Vec::new());
+        }
+
+        let entries = std::fs::read_dir(&worktrees_path).map_err(|e| e.to_string())?;
+
+        let mut worktrees = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+
+            if path.is_dir() {
+                let worktree_name = entry.file_name().to_string_lossy().to_string();
+                // Verify it has a meta.toml file to confirm it's a valid worktree
+                if Path::new(&self.worktree_meta_path(label, &worktree_name)).exists() {
+                    let worktree = self.load_worktree(label, &worktree_name)?;
+                    worktrees.push((format!("{}+{}", label, worktree.name()), worktree));
+                }
+            }
+        }
+
+        worktrees.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(worktrees)
+    }
+
+    /// List all worktrees across all labels in the store
+    pub fn list_all_worktrees(&self) -> Result<Vec<(String, Worktree)>, String> {
+        let mut all_worktrees = Vec::new();
+        let labels = self.list_all_refs()?;
+
+        for label in labels {
+            let worktrees = self.list_worktrees(&label)?;
+            all_worktrees.extend(worktrees);
+        }
+
+        all_worktrees.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(all_worktrees)
+    }
+
+    /// Load worktree metadata from storage
+    pub fn load_worktree(
+        &self,
+        label: &str,
+        worktree_name: &str,
+    ) -> Result<crate::commit::Worktree, String> {
+        let meta_path = self.worktree_meta_path(label, worktree_name);
+
+        if !Path::new(&meta_path).exists() {
+            return Err(format!(
+                "Worktree {}:{} does not exist",
+                label, worktree_name
+            ));
+        }
+
+        let toml_content = std::fs::read_to_string(&meta_path)
+            .map_err(|e| format!("Failed to read worktree metadata: {}", e))?;
+
+        let worktree: crate::commit::Worktree = toml::from_str(&toml_content)
+            .map_err(|e| format!("Failed to parse worktree metadata: {}", e))?;
+
+        Ok(worktree)
+    }
+
+    /// Save worktree metadata to storage
+    pub fn save_worktree_metadata(
+        &self,
+        label: &str,
+        worktree: &crate::commit::Worktree,
+    ) -> Result<(), String> {
+        let meta_path = self.worktree_meta_path(label, worktree.name());
+        let toml_content = toml::to_string(worktree).map_err(|e| e.to_string())?;
+
+        // Ensure parent directory exists
+        if let Some(parent) = Path::new(&meta_path).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+
+        std::fs::write(&meta_path, toml_content).map_err(|e| e.to_string())?;
+
+        tracing::debug!("Saved worktree metadata at: {}", meta_path);
+        Ok(())
+    }
+
+    /// Remove a worktree (must be unmounted first)
+    pub fn remove_worktree(&self, label: &str, worktree_name: &str) -> Result<(), String> {
+        // Prevent removal of the main worktree
+        if worktree_name == Self::DEFAULT_WORKTREE {
+            return Err("Cannot remove the main worktree".to_string());
+        }
+
+        // Check if worktree exists
+        if !self.worktree_exists(label, worktree_name) {
+            return Err(format!(
+                "Worktree {}:{} does not exist",
+                label, worktree_name
+            ));
+        }
+
+        // Check if worktree is currently mounted using state manager
+        if self.is_worktree_mounted(label, worktree_name)? {
+            return Err(format!(
+                "Worktree {}:{} is currently mounted. Unmount it first.",
+                label, worktree_name
+            ));
+        }
+
+        // Remove the entire worktree directory
+        let worktree_path = self.worktree_path(label, worktree_name);
+        std::fs::remove_dir_all(&worktree_path).map_err(|e| {
+            format!(
+                "Failed to remove worktree directory {}: {}",
+                worktree_path, e
+            )
+        })?;
+
+        tracing::info!("Removed worktree {}:{}", label, worktree_name);
+        Ok(())
+    }
+
+    /// Update state manager with mount information after unmounting
+    pub fn remove_mount_from_state(&self, mountpoint: &str) -> Result<(), String> {
+        self.state_manager.remove_mount(Path::new(mountpoint))?;
+        Ok(())
+    }
+
+    /// Check if a worktree is currently mounted using state manager
+    pub fn is_worktree_mounted(&self, label: &str, worktree_name: &str) -> Result<bool, String> {
+        self.state_manager.is_worktree_mounted(label, worktree_name)
+    }
+
+    /// Get the mount path for a worktree from state manager
+    pub fn get_worktree_mount_path(
+        &self,
+        label: &str,
+        worktree_name: &str,
+    ) -> Result<Option<PathBuf>, String> {
+        self.state_manager
+            .find_mount_by_worktree(label, worktree_name)
+    }
+
+    /// Mark a worktree as committed and save metadata
+    pub fn mark_worktree_committed(&self, label: &str, worktree_name: &str) -> Result<(), String> {
+        let mut worktree = self.load_worktree(label, worktree_name)?;
+        worktree.mark_committed();
+        self.save_worktree_metadata(label, &worktree)?;
+        Ok(())
+    }
+
+    /// Check if a worktree has uncommitted changes
+    pub fn worktree_has_changes(&self, label: &str, worktree_name: &str) -> Result<bool, String> {
+        let worktree = self.load_worktree(label, worktree_name)?;
+        let upperdir_string = self.worktree_upperdir(label, worktree_name);
+        let upperdir_path = Path::new(&upperdir_string);
+        Ok(worktree.has_uncommitted_changes(upperdir_path))
+    }
+
+    /// Get the worktree name for a mount point using the state manager
+    pub fn find_worktree_by_mount(
+        &self,
+        label: &str,
+        mount_path: &str,
+    ) -> Result<Option<String>, String> {
+        // Use the state manager to find which worktree is mounted at this path
+        let state = self.state_manager.load_state()?;
+
+        for (mount_point, mounted_stratum) in state.mounts.iter() {
+            if mount_point.to_string_lossy() == mount_path {
+                if let crate::state::StratumMountRef::Worktree {
+                    label: mount_label,
+                    worktree,
+                } = &mounted_stratum.stratum_ref
+                {
+                    if mount_label == label {
+                        return Ok(Some(worktree.clone()));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    // == End Worktree Management ==
 
     /// Import a bare directory on top of an existing commit (for layering/patches)
     /// This is useful for applying deltas, patches, or mods on top of existing commits
@@ -644,6 +1013,28 @@ impl Store {
         Ok(objects)
     }
 
+    /// Verify objects in a commit using composefs-info and find missing objects
+    pub fn verify_commit_objects(&self, commit_id: &str) -> Result<Vec<String>, String> {
+        // Verify objects in a commit using composefs-info
+        let commit_file = format!("{}/{}", self.commit_path(commit_id), Self::COMMIT_FILE);
+        if !Path::new(&commit_file).exists() {
+            return Err(format!("Commit file not found: {}", commit_file));
+        }
+
+        let missing_objects = self.composefs_info_missing_objects(&commit_file)?;
+        if missing_objects.is_empty() {
+            tracing::info!("All objects for commit {} are present", commit_id);
+            Ok(vec![])
+        } else {
+            tracing::warn!(
+                "Missing objects for commit {}: {}",
+                commit_id,
+                missing_objects.join(", ")
+            );
+            Ok(missing_objects)
+        }
+    }
+
     // -- end composefs wrappers --
 
     /// Calculate total size of directory
@@ -694,10 +1085,26 @@ impl Store {
         let commit = self.load_commit(commit_id)?;
         let stored_merkle_root = commit.merkle_root();
 
+        // Check if commit exists and metadata is valid
+        if !self.commit_exists(commit_id) || stored_merkle_root.is_empty() {
+            return Ok(false);
+        }
+
+        // Verify all objects for this commit are present
+        let missing_objects = self.verify_commit_objects(commit_id)?;
+        if !missing_objects.is_empty() {
+            tracing::warn!(
+                "Commit {} has missing objects: {}",
+                commit_id,
+                missing_objects.join(", ")
+            );
+            return Ok(false);
+        }
+
         // Recalculate merkle root from the original directory structure
         // Note: This would need the original directory or reconstructed from composefs
-        // For now, just verify the commit exists and metadata is valid
-        Ok(self.commit_exists(commit_id) && !stored_merkle_root.is_empty())
+        // For now, just verify the commit exists, metadata is valid, and all objects are present
+        Ok(true)
     }
 }
 

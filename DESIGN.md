@@ -150,7 +150,7 @@ note: consider using advisory locks to lock the state file and prevent concurren
 - `stratum worktree add <stratum_ref> <worktree_name>` - create a new worktree based on a commit
 - `stratum worktree list <stratum_ref>` - list all worktrees for a stratum
 - `stratum worktree remove <stratum_ref+worktree>` - remove a worktree (must be unmounted first)
-- `stratum worktree switch <stratum_ref+worktree>` - switch to a different worktree (for shell integration)
+- `stratum worktree switch <stratum_ref+worktree> </mountpoint>` - switch to a different worktree (for shell integration)
 - `stratum init <stratum_ref> <mountpoint>` - initialize a new empty state, mounts it to a mountpoint, optionally taking `--migrate` to migrate an existing directory
 - `stratum mount <stratum_ref:optional_worktree_or_tag> <optional_mountpoint>` - mount a stratum by stratum_ref and worktree/tag, if no worktree is specified, the `main` worktree should be used,
   if no mountpoint is specified, a temporary mountpoint should be created somewhere in `/run/user/<uid>/stratum/<stratum_ref:optional_worktree_or_tag>`

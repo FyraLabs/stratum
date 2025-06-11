@@ -45,8 +45,6 @@ pub struct WorktreeInfo {
     ///
     /// Optional because a worktree may be a fresh overlay that has not ever been committed yet
     pub last_committed: Option<chrono::DateTime<chrono::Utc>>,
-    /// Optional path where this worktree is currently mounted
-    pub mounted_at: Option<String>,
     /// Optional description of what this worktree is for
     pub description: Option<String>,
 }
@@ -168,7 +166,6 @@ impl Worktree {
                 created: now,
                 last_modified: now,
                 last_committed: None,
-                mounted_at: None,
                 description,
             },
         }
@@ -182,21 +179,6 @@ impl Worktree {
     /// Returns the base commit ID
     pub fn base_commit(&self) -> &str {
         &self.worktree.base_commit
-    }
-
-    /// Returns whether this worktree is currently mounted
-    pub fn is_mounted(&self) -> bool {
-        self.worktree.mounted_at.is_some()
-    }
-
-    /// Returns the mount path if mounted
-    pub fn mount_path(&self) -> Option<&str> {
-        self.worktree.mounted_at.as_deref()
-    }
-
-    /// Sets the mount path for this worktree
-    pub fn set_mounted_at(&mut self, path: Option<String>) {
-        self.worktree.mounted_at = path;
     }
 
     /// Updates the last committed timestamp
@@ -251,30 +233,10 @@ mod tests {
 
         assert_eq!(worktree.name(), "main");
         assert_eq!(worktree.base_commit(), "abc123");
-        assert!(!worktree.is_mounted());
-        assert_eq!(worktree.mount_path(), None);
         assert_eq!(
             worktree.worktree.description,
             Some("Main development branch".to_string())
         );
-    }
-
-    #[test]
-    fn test_worktree_mount_operations() {
-        let mut worktree = Worktree::new("feature".to_string(), "def456".to_string(), None);
-
-        // Initially not mounted
-        assert!(!worktree.is_mounted());
-
-        // Set mount path
-        worktree.set_mounted_at(Some("/tmp/mount".to_string()));
-        assert!(worktree.is_mounted());
-        assert_eq!(worktree.mount_path(), Some("/tmp/mount"));
-
-        // Unmount
-        worktree.set_mounted_at(None);
-        assert!(!worktree.is_mounted());
-        assert_eq!(worktree.mount_path(), None);
     }
 
     #[test]

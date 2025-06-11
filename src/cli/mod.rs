@@ -1,6 +1,8 @@
+mod worktree;
 use crate::commit::StratumRef;
 use crate::util::{self};
 use clap::{Parser, Subcommand};
+use rustix::process::getuid;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -12,51 +14,50 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 #[clap(version, about, author)]
 pub enum Commands {
-    /// Import a directory as a new stratum,
-    /// optionally tagging it for layering on top of an existing commit.
-    ///
+    /// Import a directory as a new stratum commit
     Import {
-        /// Label for the import operation.
-        ///
-        /// This label should be in the format "stratum:tag"
-        /// where "stratum" is the name of the stratum and "tag" is an optional tag.
-        /// If no tag is provided, it defaults to "latest".
-        // positonal arg
-        // todo: Import to HEAD, remount and commit as lower dir but still below
-        // HEAD's upperdir, may need to create new temp overlayfs
-        #[clap(value_parser)]
-        label: String,
-
         /// Directory to import from
-        ///
-        /// The layering will be relative to this directory.
         #[clap(value_parser)]
-        dir: PathBuf,
+        directory: PathBuf,
 
-        /// Optional ref to layer this import on top of.
+        /// Name for the stratum (label)
+        #[clap(value_parser)]
+        name: String,
+
+        /// Import as a bare directory (default behavior)
         #[clap(long)]
-        source_ref: Option<StratumRef>,
+        bare: bool,
+
+        /// Import as a patch on top of an existing stratum
+        #[clap(long)]
+        patch: Option<StratumRef>,
     },
 
+    /// Create a tag pointing to a specific commit
     Tag {
-        /// Source ref to tag
+        /// Source stratum reference (commit ID or existing tag)
         #[clap(value_parser)]
         source: StratumRef,
-        /// Target tag to apply to
+
+        /// New tag name to create
         #[clap(value_parser)]
-        target: String,
+        new_tag: String,
     },
 
-    /// Mount a stratum at a given path.
+    /// Mount a stratum at a given path
     Mount {
-        /// The reference to mount
+        /// The stratum reference to mount (supports format: stratum_ref:tag or stratum_ref+worktree)
         #[clap(value_parser)]
         stratum_ref: StratumRef,
 
-        /// The path to mount the stratum at
+        /// The path to mount the stratum at (optional, will auto-generate if not provided)
         #[clap(value_parser)]
-        mountpoint: PathBuf,
+        mountpoint: Option<PathBuf>,
     },
+
+    /// Manage worktrees
+    #[clap(subcommand)]
+    Worktree(worktree::WorktreeCommand),
 }
 
 const BASE_PATH: &str = "dev/stratum";
@@ -67,26 +68,37 @@ impl Cli {
         tracing::trace!("Running command: {:?}", self.command);
         match self.command {
             Commands::Import {
-                dir,
-                label,
-                source_ref,
+                directory,
+                name,
+                bare: _,
+                patch,
             } => {
-                if !dir.is_dir() {
-                    return Err(format!("{} is not a directory", dir.display()));
+                if !directory.is_dir() {
+                    return Err(format!("{} is not a directory", directory.display()));
                 }
 
                 tracing::info!(
                     "Importing directory: {} with label: {}",
-                    dir.display(),
-                    label
+                    directory.display(),
+                    name
                 );
 
-                let (stratum_label, tag) = util::parse_label(&label)
-                    .map_err(|e| format!("Failed to parse label '{}': {}", label, e))?;
+                let (stratum_label, tag) = util::parse_label(&name)
+                    .map_err(|e| format!("Failed to parse label '{}': {}", name, e))?;
 
                 // Import the directory and get the commit ID
-                let commit_id =
-                    store.import_directory(&stratum_label, &dir.to_string_lossy(), None)?;
+                let parent_commit = if let Some(patch_ref) = patch {
+                    let commit_id = patch_ref.resolve_commit_id(&store)?;
+                    store.import_directory(
+                        &stratum_label,
+                        &directory.to_string_lossy(),
+                        Some(&commit_id),
+                    )?
+                } else {
+                    store.import_directory(&stratum_label, &directory.to_string_lossy(), None)?
+                };
+
+                let commit_id = parent_commit;
 
                 // Always tag the commit - use provided tag or default to "latest"
                 let tag_name = tag.unwrap_or_else(|| "latest".to_string());
@@ -104,32 +116,66 @@ impl Cli {
                 println!("{}  (tagged as {}:{})", commit_id, stratum_label, tag_name);
                 Ok(())
             }
-            Commands::Tag { source, target } => {
-                let (target_label, target_tag) = util::parse_label(&target)
-                    .map_err(|e| format!("Failed to parse target label '{}': {}", target, e))?;
-                let target_tag = target_tag.unwrap_or("latest".to_string());
-
+            Commands::Tag { source, new_tag } => {
                 let commit_id = source.resolve_commit_id(&store).map_err(|e| {
                     format!("Failed to resolve source commit ID '{:?}': {}", source, e)
                 })?;
-                tracing::info!("Tagging commit {} with tag '{}'", commit_id, target);
+
+                let (target_label, target_tag) = util::parse_label(&new_tag)
+                    .map_err(|e| format!("Failed to parse target label '{}': {}", new_tag, e))?;
+                let target_tag = target_tag.unwrap_or("latest".to_string());
+
+                tracing::info!("Tagging commit {} with tag '{}'", commit_id, new_tag);
                 store
                     .tag_commit(&target_label, &commit_id, &target_tag)
                     .map_err(|e| format!("Failed to tag commit '{}': {}", commit_id, e))?;
-                println!("Tagged commit {} with '{}'", commit_id, target);
+                println!("Tagged commit {} with '{}'", commit_id, new_tag);
                 Ok(())
             }
             Commands::Mount {
                 stratum_ref,
                 mountpoint,
             } => {
+                // Generate mountpoint if not provided
+                let mount_path = if let Some(mp) = mountpoint {
+                    mp.to_string_lossy().to_string()
+                } else {
+                    // Generate auto mountpoint based on design: /run/user/<uid>/stratum/<stratum_ref>
+                    let uid = getuid();
+                    let auto_mountpoint =
+                        format!("/run/user/{}/stratum/{}", uid.as_raw(), stratum_ref);
+                    std::fs::create_dir_all(&auto_mountpoint).map_err(|e| {
+                        format!(
+                            "Failed to create auto mountpoint {}: {}",
+                            auto_mountpoint, e
+                        )
+                    })?;
+                    println!("{}", auto_mountpoint); // Print auto-generated mountpoint to stdout
+                    auto_mountpoint
+                };
+
                 tracing::info!(
                     "Mounting stratum reference {:?} at {}",
                     stratum_ref,
-                    mountpoint.display()
+                    mount_path
                 );
-                // todo: get or make new head :D
-                store.mount_ref(&stratum_ref, &mountpoint.to_string_lossy(), None)
+
+                // Extract worktree from stratum_ref using pattern matching
+                let worktree = match &stratum_ref {
+                    crate::commit::StratumRef::Worktree { label: _, worktree } => {
+                        Some(worktree.as_str())
+                    }
+                    crate::commit::StratumRef::Tag(_) | crate::commit::StratumRef::Commit(_) => {
+                        None
+                    }
+                };
+
+                store.mount_ref(&stratum_ref, &mount_path, worktree)
+            },
+            Commands::Worktree(command) => {
+                // Delegate to the worktree command handler
+                command.execute(&store)
+                    .map_err(|e| format!("Worktree command failed: {}", e))
             }
         }
     }
