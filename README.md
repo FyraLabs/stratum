@@ -1,5 +1,7 @@
 <img align="left" style="vertical-align: middle" height="120" src="assets/stratum.svg" alt="Stratum Logo">
 
+# Stratum
+
 > Fearless Statefulness for Stateful Applications
 >
 > or: A modern, versioned mod manager for Linux
