@@ -3,6 +3,21 @@
 //! This module provides enhanced composefs mounting capabilities that support
 //! writable upperdirs on top of the read-only composefs base layers.
 
+// 
+
+/*    
+    SPDX-License-Identifier: GPL-3.0-or-later
+
+    This file is a fork of the composefs-rs project
+    (https://github.com/containers/composefs-rs), originally licensed
+    under MIT OR Apache-2.0.
+
+    Original code (c) Containers, Red Hat and contributors,
+    licensed under MIT OR Apache-2.0.
+
+    Modifications and additions (c) Fyra Labs
+*/
+
 use std::{
     fs::canonicalize,
     io::Result,

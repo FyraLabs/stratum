@@ -64,3 +64,11 @@ Stratum builds on the work of many open-source projects, we couldn't exist witho
 - [Mod Organizer 2](https://github.com/ModOrganizer2/modorganizer) — the original inspiration for per-layer modding
 - [The Linux Kernel](https://www.kernel.org/), and countless contributors
 - The modern gaming/modding community, for inspiring us to create a better way to manage patches.
+
+## License
+
+Stratum is licensed under the GNU General Public License version 3.0 or later (GPL-3.0-or-later).
+
+Stratum includes code from the ComposeFS project, which is licensed under the permissive MIT OR Apache-2.0 licenses. The original ComposeFS license terms are preserved and included in this repository.
+
+For full license details, see the [LICENSE](LICENSE) file.
