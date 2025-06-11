@@ -906,6 +906,7 @@ dependencies = [
  "clap",
  "composefs",
  "hex",
+ "libc",
  "nix",
  "rs_merkle",
  "rustix",
