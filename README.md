@@ -1,4 +1,4 @@
-<img align="left" style="vertical-align: middle" height="120" src="assets/stratum.svg" alt="Stratum Logo">
+<img align="left" style="vertical-align: middle" height="128" src="assets/stratum.svg" alt="Stratum Logo">
 
 # Stratum
 
