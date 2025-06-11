@@ -15,6 +15,7 @@ pub struct Cli {
 #[clap(version, about, author)]
 pub enum Commands {
     /// Import a directory as a new stratum commit
+    #[clap(name = "import", aliases = &["i"])]
     Import {
         /// Directory to import from
         #[clap(value_parser)]
