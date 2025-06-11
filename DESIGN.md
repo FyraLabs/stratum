@@ -15,16 +15,63 @@ The store should be something like composefs + overlayfs, with multiple named wo
 
 ## Key Concepts
 
-A managed filesystem/directory is called a **stratum** (plural strata), similar to docker images. They are addressed internally as **refs** in the stratum store, and can be mounted as a single unified view.
+### Refs/Strata
 
-A stratum consists of:
+A **stratum**, or internally a **ref**, is an individual volume managed by Stratum. It can be thought of as a single unit of state, similar to a Docker image or an OSTree commit. Each stratum can have multiple tags and worktrees associated with it.
 
-- **Commits**: Immutable snapshots of the filesystem, stored as EROFS images (using `mkcomposefs`).
-- **Tags**: Human-readable aliases for commits, allowing easy reference and management.
-- **Worktrees**: Named mutable upperdirs that allow mutable changes on top of a base commit, similar to git worktrees. Each worktree has its own upperdir and working directory. This allows for layering changes without actually committing them, enabling data like game saves or configuration files to be modified without affecting the base commit.
-- **Refs**: Namespaces for strata, allowing multiple tags and worktrees to coexist under a single label.
+A stratum is defined by its volume name, usually followed by a colon and a tag or worktree name, e.g. `myapp:latest` or `myapp+feature-branch`. However these are mutually exclusive, you may either refer to a stratum by its tag, commit hash, or its worktree reference, not combined.
 
-You should be able to mount only one stratum + worktree at a time, to avoid conflicts. You may mount multiple worktrees, but only one mount per worktree at a time. Specific commits/tags may be mounted read-only without a worktree present, allowing for a fully read-only view of the stratum at that commit/tag.
+### Commits
+
+**Commits** are Immutable snapshots of the filesystem, stored as EROFS images (using `mkcomposefs`).
+
+Unlike Git, each Stratum commit is a full snapshot of the filesystem state represented as a ComposeFS image. Commits do not store diffs, but can optionally reference a parent commit for metadata or provenance. Changes between commits are expressed by comparing Merkle roots or by looking at each commit's parent commit individually.
+
+Patch application in Stratum uses additive directory merges (OverlayFS upperdirs), optionally using whiteout files (`.wh.*`) to indicate deletions. This allows efficient binary delta updates or mod layering without recomputing full diffs.
+
+### Tags
+
+**Tags** are human-readable aliases for commits, allowing easy reference and management. They are mutable pointers to specific commits, similar to Git tags. Tags can be used to mark important points in the commit history, such as releases or stable versions.
+
+### Worktrees
+
+**Worktrees** are Named mutable upperdirs that allow mutable changes on top of a base commit, similar to git worktrees. Each worktree has its own upperdir and working directory. This allows for layering changes without actually committing them, enabling data like game saves or configuration files to be modified without affecting the base commit.
+
+Stratum prevents multiple mounts of the same worktree concurrently via a runtime advisory lock. This avoids conflicts arising from concurrent mutable overlays on a single worktree. However, mounting distinct worktrees in parallel is fully supported.
+
+These restrictions are soft and enforced only by Stratum’s tooling; manual ComposeFS mounts bypass these checks and may lead to conflicts if used improperly.
+
+```bash
+# Create a new worktree
+stratum worktree add myapp+profile-1 myapp:latest
+stratum worktree add myapp+profile-2 myapp:latest
+
+# Mount the worktree
+stratum mount myapp+profile-1 /mnt/profile-1
+stratum mount myapp+profile-2 /mnt/profile-2
+
+
+# You cannot mount the same worktree twice, this will fail:
+stratum mount myapp+profile-1 /tmp/profile-1-duplicate # Error: worktree already mounted
+
+stratum unmount /mnt/profile-1
+# Now you can mount it again
+stratum mount myapp+profile-1 /tmp/profile-1-duplicate
+
+
+# === DANGER ZONE ===
+
+# You may however, force a mount, but this is ***NOT RECOMMENDED***
+
+mount.composefs -o basedir=/path/to/stratum-store/objects,upperdir=/path/to/stratum-store/refs/myapp/worktrees/profile-1/upperdir,workdir=/path/to/stratum-store/refs/myapp/worktrees/profile-1/workdir /path/to/stratum-store/refs/myapp/tags/latest/commit.cfs /mnt/profile-1-force
+
+# This is actually what Stratum does under the hood, but you may do it yourself, But be aware that you assume full responsibility for the state of the worktree and its upperdir when doing unmanaged mounts.
+
+stratum unmount /mnt/profile-1-force # This will fail because stratum isn't aware of this mount, you must manage it manually!!
+
+# === END DANGER ZONE ===
+
+```
 
 ## Stratum Store
 
@@ -96,12 +143,68 @@ last_modified = "2025-06-10T11:15:00Z"
 description = "Main development worktree"  # Optional description
 ```
 
+## Patchsets
+
+Stratum supports the composition of multiple independent patches into a single deterministic snapshot via patchsets.
+
+Patchsets allows users to defined an ordered list of commits, which are then merged sequentially onto a base commit (or an empty root). This is especially useful for managing mod-like layers (e.g., in games), configuration overlays, or update deltas.
+
+Each patch in a patchset should be a **bare commit**, a minimal snapshot containing the delta (new/changed files, whiteouts, etc.) Without relying on an existing commit. These patches do not need to share the same base commit and are merged using a ***last-write-wins*** strategy.
+
+> [!NOTE]
+> You may still import a commit with an existing base commit, but note that this will copy-up all files, slightly degrading performance on patchset application. However it is a **no-op** in the end due to the nature of
+> ComposeFS, which manages each file as a content-addressable, deduplicated blob.
+
+### Patchset File Format
+
+A patchset is a TOML file that defines how to apply a series of patches to create the final commit. They are usually named `*.patchset.toml`, and contain the following sections:
+
+```toml
+[patchset]
+base = "myapp:stable" # Optional base commit, if not defined will base from first patch instead
+
+patches = [
+  "myapp:modloader",
+  "myapp:patch-fixes",
+  "myapp:patch-ui",
+  "myapp:patch-localization",
+  "myapp:content-mod-x",
+  "myapp:content-mod-y",
+  # If a patch conflicts with another, the last
+  # applied patch wins, so in this case, it's mod Z that gets applied in the end, combined with mod Y's unique files, if any
+  "myapp:content-mod-z-conflicts-with-y"
+  # You may even use commit hashes directly here, if you know the hash
+  "a1b2c3d4e5f6...", # Direct commit hash
+]
+```
+
+### How the patchset is applied
+
+When you use a patchset, Stratum will:
+
+1. Start with the base commit if exists (or the first patch if not defined)
+2. For each patch, create transient OverlayFS mount with the base, and and the next patch as the upperdir
+3. Create a **transient commit** to be used as the base for the next patch
+4. Finally, after the final patch, it generates a new commit with the final filesystem view, which can then be tagged or rebased for a new worktree.
+
+### Transient Commits
+
+During patchset application, Stratum creates **transient commits** that won't register new objects in the store.
+These commits exist solely during orchestration and are immediately discarded after the final commit is created.
+
+This avoids unnecessary I/O overhead from registering intermediate states, ensuring that object references remain meaningful and minimal.
+
 ## Workflow Examples
 
 ```bash
 # Import directory as new commit
-stratum import /path/to/app --label myapp
-# Returns: "myapp:a1b2c3d4e5f6..."
+stratum import --bare /path/to/app myapp
+# Returns: "a1b2c3d4e5f6...", also addressable as myapp:latest
+# You can also use --patch to import a directory as a patch on top of an existing commit.
+# Import a patch on top of an existing commit
+stratum import --bare --patch myapp:latest myapp:feature-x /path/to/patchtree
+# Import a Stratum export file
+stratum import /path/to/export.stratum.tar myapp
 
 # Create human-readable tags
 stratum tag myapp:a1b2c3d4... v1.0
@@ -184,3 +287,11 @@ note: consider using advisory locks to lock the state file and prevent concurren
   ```
   
 - `stratum tag <stratum_ref> <new_tag>` - copies a tag to a new tag, maybe consider --move to delete/rename the old tag
+
+## Additional Notes
+
+Stratum’s ComposeFS implementation is a fork of the Rust ComposeFS project, re-implemented to enable writable OverlayFS upperdir support—a feature upstream lacks due to its tarball-based, read-only OSTree-style Repository model.
+
+The upstream Rust ComposeFS project is explicitly experimental, described by its author as a fast-iteration playground and learning project, not intended for immediate production use. It is expected to eventually merge into more complete systems, like Stratum as seen here.
+
+While the upstream C ComposeFS mount helper supports writable OverlayFS upperdirs, the official Rust ComposeFS implementation does not. To maintain a fully Rust-native userspace workflow without shelling out, Stratum re-implements ComposeFS to add this capability directly.

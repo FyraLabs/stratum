@@ -81,9 +81,15 @@ impl Cli {
             Commands::Import {
                 directory,
                 name,
-                bare: _, // todo: handle bare import
+                bare, // todo: handle bare import
                 patch,
             } => {
+                if !bare {
+                    unimplemented!(
+                        "Export file import is not yet implemented, please use --bare option for now."
+                    );
+                }
+
                 if !directory.is_dir() {
                     return Err(format!("{} is not a directory", directory.display()));
                 }
@@ -104,7 +110,7 @@ impl Cli {
                         &stratum_label,
                         &directory.to_string_lossy(),
                         &commit_id,
-                        false
+                        false,
                     )?
                 } else {
                     store.commit_directory_bare(
@@ -188,20 +194,27 @@ impl Cli {
                 };
 
                 store.mount_ref(&stratum_ref, &mount_path, worktree)
-            },
+            }
             Commands::Unmount { mountpoint } => {
                 tracing::info!("Unmounting stratum from {}", mountpoint.display());
-                store.unmount_ref(&mountpoint.to_string_lossy())
-                    .map_err(|e| format!("Failed to unmount stratum from '{}': {}", mountpoint.display(), e))?;
+                store
+                    .unmount_ref(&mountpoint.to_string_lossy())
+                    .map_err(|e| {
+                        format!(
+                            "Failed to unmount stratum from '{}': {}",
+                            mountpoint.display(),
+                            e
+                        )
+                    })?;
                 println!("Unmounted stratum from {}", mountpoint.display());
                 Ok(())
-            },
+            }
             Commands::Worktree(command) => {
                 // Delegate to the worktree command handler
                 command
                     .execute(&store)
                     .map_err(|e| format!("Worktree command failed: {}", e))
-            },
+            }
             Commands::Remove { stratum_ref } => {
                 // todo: safety check: duplicate commits?
                 tracing::info!("Removing stratum reference: {:?}", stratum_ref);

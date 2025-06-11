@@ -159,7 +159,13 @@ impl Store {
         )
     }
 
-    /// Mount a reference using native Rust composefs implementation
+    /// Mount a reference at a given mountpoint.
+    ///
+    /// This keeps track of currently-mounted points using [`crate::state::StateManager`],
+    /// preventing the same worktree to be mounted mutably concurrently.
+    ///
+    /// If you're creating an ephemeral mount for the purpose of staging new commits,
+    /// consider [`Self::mount_ref_ephemeral`] instead.
     ///
     /// # Arguments
     /// * `sref` - The stratum reference to mount
@@ -321,6 +327,15 @@ impl Store {
         Ok(())
     }
 
+    /// Temporarily mounts a stratum commit at a mountpoint using an ephemeral mount.
+    /// Returns a [`crate::mount::FsHandle`] for the mounted filesystem, which are
+    /// automatically unmounted when dropped from memory.
+    ///
+    /// # Safety
+    ///
+    /// You may use [`std::mem::forget`] to prevent the handle from unmounting the filesystem,
+    /// but at that point you should use [`Self::mount_ref`] instead, as it is safer and tracks states
+    /// inside [`crate::state::StateManager`]
     pub fn mount_ref_ephemeral(
         &self,
         sref: &StratumRef,
@@ -480,8 +495,14 @@ impl Store {
 
         tracing::debug!("Deleting commit {}", commit_id);
 
-        // Unregister all objects for this commit
-        self.unregister_objects(commit_id)?;
+        // Unregister all objects for this commit (don't fail if objects aren't registered)
+        if let Err(e) = self.unregister_objects(commit_id) {
+            tracing::warn!(
+                "Failed to unregister objects for commit {}: {}",
+                commit_id,
+                e
+            );
+        }
 
         // Remove the commit directory
         let commit_path = self.commit_path(commit_id);
@@ -545,6 +566,10 @@ impl Store {
     }
 
     /// Import a directory and create a content-addressed commit
+    /// 
+    /// Optionally has a `parent_commit` field that specifies
+    /// how this commit was built from. Does not do anything other than metadata.
+    /// See [`Self::union_patch_commit`] for actually merging commits
     ///
     /// # Arguments
     /// * `label` - The label (namespace) for this commit
@@ -1010,7 +1035,7 @@ impl Store {
         let parent_dir = dir_path_buf.parent().unwrap_or(Path::new("/tmp"));
         // remind to self: don't put this tempfile inside the scope of tempdir_in
         // because it will be dropped before the overlayfs mount is created
-        
+
         let ovl_mountpoint = tempfile::tempdir()
             .map_err(|e| format!("Failed to create temporary overlayfs mount: {}", e))?;
 
