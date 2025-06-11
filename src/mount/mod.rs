@@ -176,19 +176,10 @@ impl Drop for TempOvlMount {
         // First try with DETACH, which is less forceful
         if let Err(e) = umount2(self.get_mountpoint(), MntFlags::empty()) {
             tracing::error!(
-                "Failed to unmount {}: {}, trying with MNT_FORCE",
+                "Failed to unmount {}: {}",
                 self.get_mountpoint().display(),
                 e
             );
-
-            // If DETACH fails, try with FORCE
-            if let Err(e) = umount2(self.get_mountpoint(), MntFlags::MNT_FORCE) {
-                tracing::error!(
-                    "Failed to unmount {} with MNT_FORCE: {}",
-                    self.get_mountpoint().display(),
-                    e
-                );
-            }
         }
 
         // Now that the mountpoint is unmounted, sync the remaining directories
