@@ -54,6 +54,7 @@ pub enum Commands {
         new_tag: String,
     },
 
+    /// Remove a tag from a stratum
     #[clap(name = "untag", aliases = &["ut"])]
     Untag {
         #[clap(value_parser)]
