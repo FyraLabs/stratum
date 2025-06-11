@@ -6,6 +6,7 @@
 //! This is similar to composefs-rs' `Repository` type.
 
 use composefs::mount::FsHandle;
+use tempfile::TempDir;
 
 use crate::{
     commit::{StratumRef, Worktree},
@@ -20,9 +21,14 @@ use std::{
 };
 
 /// Copy a directory recursively.
-fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
+pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
+    let src_path = src.as_ref();
+    let dst_path = dst.as_ref();
+    
+    tracing::debug!("Copying directory from {} to {}", src_path.display(), dst_path.display());
+    
     fs::create_dir_all(&dst)?;
-    for entry in fs::read_dir(src)? {
+    for entry in fs::read_dir(src_path)? {
         let entry = entry?;
         let ty = entry.file_type()?;
         let path = entry.path();
@@ -32,9 +38,12 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> 
         if ty.is_dir() {
             copy_dir_all(&path, &target)?;
         } else {
+            tracing::trace!("Copying file {} to {}", path.display(), target.display());
             fs::copy(&path, &target)?;
         }
     }
+    
+    tracing::debug!("Finished copying directory from {} to {}", src_path.display(), dst_path.display());
     Ok(())
 }
 
@@ -51,6 +60,7 @@ impl Store {
     const REFS_DIR: &'static str = "refs";
     const TAGS_DIR: &'static str = "tags";
     const WORKTREES_DIR: &'static str = "worktrees";
+    const TEMP_DIR: &'static str = "temp";
 
     // Default worktree name
     const DEFAULT_WORKTREE: &'static str = "main";
@@ -77,6 +87,19 @@ impl Store {
 
     pub fn base_path(&self) -> &str {
         &self.base_path
+    }
+
+    pub fn temp_path(&self) -> String {
+        let path = format!("{}/{}", self.base_path, Self::TEMP_DIR);
+        std::fs::create_dir_all(&path).ok();
+        path
+    }
+
+    pub fn new_tempdir(&self) -> TempDir {
+        tempfile::Builder::new()
+            .prefix("stratum_temp_")
+            .tempdir_in(self.temp_path())
+            .expect("Failed to create temporary directory")
     }
 
     /// Returns the path to the given ref's directory
@@ -371,6 +394,7 @@ impl Store {
             sref.to_string(),
         );
 
+        tracing::trace!("Creating mount config for stratum ref: {}", sref);
         let config = config
             .with_basedir(std::path::PathBuf::from(self.objects_path()))
             .with_source_name(sref.to_string());

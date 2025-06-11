@@ -4,7 +4,6 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::time::SystemTime;
 
 // Parses and OCI-style tag into a tuple of name and optional tag.
 pub fn parse_label(label: &str) -> Result<(String, Option<String>), String> {
@@ -114,16 +113,16 @@ fn calculate_dir_hash(dir_path: &Path) -> io::Result<[u8; 32]> {
             // Hash file size
             hasher.update(metadata.len().to_le_bytes());
 
-            // Hash modification time (fallback to 0 if unavailable)
-            let mtime = metadata
-                .modified()
-                .unwrap_or(SystemTime::UNIX_EPOCH)
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            hasher.update(mtime.to_le_bytes());
+            // NOTE: We intentionally exclude modification time (mtime) from the hash
+            // to ensure deterministic commit IDs. File content and size are sufficient
+            // for identifying changes, while including timestamps would make
+            // commits non-reproducible across different build environments.
 
-            tracing::trace!(?path, size = metadata.len(), mtime, "Hashed file metadata");
+            tracing::trace!(
+                ?path,
+                size = metadata.len(),
+                "Hashed file metadata (excluding mtime for determinism)"
+            );
         } else {
             tracing::trace!(?path, "Ignoring non-file, non-directory entry");
         }

@@ -1,10 +1,6 @@
 use crate::commit::StratumRef;
-use crate::commit::{Worktree, WorktreeInfo};
-use crate::state::{StateManager, StratumState};
 use crate::store::Store;
-use crate::util;
-use clap::{Parser, Subcommand};
-use std::path::{Path, PathBuf};
+use clap::Parser;
 
 #[derive(Parser, Debug)]
 pub enum WorktreeCommand {

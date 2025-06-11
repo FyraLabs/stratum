@@ -174,9 +174,9 @@ impl Drop for TempOvlMount {
     fn drop(&mut self) {
         // First unmount the filesystem
         // First try with DETACH, which is less forceful
-        if let Err(e) = umount2(self.get_mountpoint(), MntFlags::MNT_DETACH) {
+        if let Err(e) = umount2(self.get_mountpoint(), MntFlags::empty()) {
             tracing::error!(
-                "Failed to unmount {} with MNT_DETACH: {}, trying with MNT_FORCE",
+                "Failed to unmount {}: {}, trying with MNT_FORCE",
                 self.get_mountpoint().display(),
                 e
             );

@@ -1,11 +1,12 @@
 use clap::Parser;
 mod cli;
 mod commit;
+mod mount;
 mod object;
+mod patchset;
+mod state;
 mod store;
 mod util;
-mod state;
-mod mount;
 
 fn main() {
     tracing_subscriber::fmt()

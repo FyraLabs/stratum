@@ -1,3 +1,4 @@
+mod patchset;
 mod worktree;
 use crate::commit::StratumRef;
 use crate::util::{self};
@@ -83,9 +84,16 @@ pub enum Commands {
     /// Manage worktrees
     #[clap(subcommand, name = "worktree", alias = "wt")]
     Worktree(worktree::WorktreeCommand),
+
+    /// Patchset management commands
+    #[clap(subcommand, name = "patchset", alias = "ps")]
+    Patchset(patchset::PatchsetCommand),
 }
 
+#[cfg(debug_assertions)]
 const BASE_PATH: &str = "dev/stratum";
+#[cfg(not(debug_assertions))]
+const BASE_PATH: &str = "/var/lib/stratum";
 
 impl Cli {
     pub fn run(self) -> Result<(), String> {
@@ -242,6 +250,12 @@ impl Cli {
                 command
                     .execute(&store)
                     .map_err(|e| format!("Worktree command failed: {}", e))
+            }
+            Commands::Patchset(command) => {
+                // Delegate to the patchset command handler
+                command
+                    .execute(&store)
+                    .map_err(|e| format!("Patchset command failed: {}", e))
             }
             Commands::Remove { stratum_ref } => {
                 // todo: safety check: duplicate commits?
