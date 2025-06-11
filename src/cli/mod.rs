@@ -73,6 +73,7 @@ pub enum Commands {
     },
 
     #[clap(name = "unmount", aliases = &["umount", "um", "u", "umnt"])]
+    /// Unmount a stratum volume from a given path
     Unmount {
         /// The path to unmount the stratum from
         #[clap(value_parser)]
