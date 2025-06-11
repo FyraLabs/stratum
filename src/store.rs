@@ -179,6 +179,10 @@ impl Store {
         std::fs::create_dir_all(mountpoint)
             .map_err(|e| format!("Failed to create mountpoint {}: {}", mountpoint, e))?;
 
+        // Canonicalize the mount path for consistent storage
+        let canonical_mountpoint = std::fs::canonicalize(mountpoint)
+            .map_err(|e| format!("Failed to canonicalize mountpoint {}: {}", mountpoint, e))?;
+
         // Check if already mounted
         if self.is_mounted(mountpoint)? {
             tracing::info!("Already mounted at {}", mountpoint);
@@ -246,17 +250,19 @@ impl Store {
                 )
                 .map_err(|e| format!("Failed to mount composefs: {}", e))?;
 
-                // Update state manager with mount information
+                // Update state manager with mount information using canonical path
                 let mounted_stratum = crate::state::MountedStratum {
                     stratum_ref: crate::state::StratumMountRef::Worktree {
                         label: sref.to_string(),
                         worktree: worktree_name.to_string(),
                     },
-                    mount_point: PathBuf::from(mountpoint),
+                    mount_point: canonical_mountpoint.clone(),
                     read_only: false, // Worktrees are always writable
+                    // Base commit of the worktree, useful for safety checks
+                    base_commit: cid.clone(),
                 };
                 self.state_manager
-                    .add_mount(PathBuf::from(mountpoint), mounted_stratum)?;
+                    .add_mount(canonical_mountpoint.clone(), mounted_stratum)?;
 
                 tracing::info!(
                     "Successfully mounted {} at {} using native implementation (worktree: {})",
@@ -294,14 +300,15 @@ impl Store {
                 )
                 .map_err(|e| format!("Failed to mount composefs: {}", e))?;
 
-                // Update state manager with mount information
+                // Update state manager with mount information using canonical path
                 let mounted_stratum = crate::state::MountedStratum {
                     stratum_ref: crate::state::StratumMountRef::Snapshot(sref.clone()),
-                    mount_point: PathBuf::from(mountpoint),
+                    mount_point: canonical_mountpoint.clone(),
+                    base_commit: cid.clone(),
                     read_only: true, // Read-only snapshots
                 };
                 self.state_manager
-                    .add_mount(PathBuf::from(mountpoint), mounted_stratum)?;
+                    .add_mount(canonical_mountpoint, mounted_stratum)?;
 
                 tracing::info!(
                     "Successfully mounted {} at {} using native implementation (read-only)",
@@ -408,31 +415,37 @@ impl Store {
 
     /// Unmount a composefs mount using native Rust implementation
     pub fn unmount_ref(&self, mountpoint: &str) -> Result<(), String> {
-        if !self.is_mounted(mountpoint)? {
-            tracing::info!("Not mounted at {}", mountpoint);
+        // Canonicalize the mount path for consistent storage and comparison
+        let canonical_mountpoint = std::fs::canonicalize(mountpoint)
+            .map_err(|e| format!("Failed to canonicalize mountpoint {}: {}", mountpoint, e))?;
+
+        if !self.is_mounted(&canonical_mountpoint.to_string_lossy())? {
+            tracing::info!("Not mounted at {}", canonical_mountpoint.display());
             return Ok(());
         }
 
         // Safety check: verify the mount is registered in state manager
         let state = self.state_manager.load_state()?;
-        let mount_path = Path::new(mountpoint);
 
-        if !state.mounts.contains_key(mount_path) {
+        if !state.mounts.contains_key(&canonical_mountpoint) {
             tracing::warn!(
                 "Mount at {} not found in state manager, but appears to be mounted",
-                mountpoint
+                canonical_mountpoint.display()
             );
-            return Err(format!("Mount at {} is not managed by stratum", mountpoint));
+            return Err(format!(
+                "Mount at {} is not managed by stratum",
+                canonical_mountpoint.display()
+            ));
         }
 
         // Use native Rust composefs unmounting implementation
-        crate::mount::composefs::unmount_composefs_at(Path::new(mountpoint))
+        crate::mount::composefs::unmount_composefs_at(&canonical_mountpoint)
             .map_err(|e| format!("Failed to unmount composefs: {}", e))?;
 
         // Remove mount from state manager
-        self.state_manager.remove_mount(Path::new(mountpoint))?;
+        self.state_manager.remove_mount(&canonical_mountpoint)?;
 
-        tracing::info!("Successfully unmounted {}", mountpoint);
+        tracing::info!("Successfully unmounted {}", canonical_mountpoint.display());
         Ok(())
     }
 
@@ -456,6 +469,32 @@ impl Store {
         Ok(())
     }
 
+    pub fn delete_commit(&self, commit_id: &str) -> Result<(), String> {
+        // todo: safety check if commit is still mounted
+        if self.state_manager.get_commit_mounted(commit_id)? {
+            return Err(format!(
+                "Cannot delete commit {}: it is currently mounted",
+                commit_id
+            ));
+        }
+
+        tracing::debug!("Deleting commit {}", commit_id);
+
+        // Unregister all objects for this commit
+        self.unregister_objects(commit_id)?;
+
+        // Remove the commit directory
+        let commit_path = self.commit_path(commit_id);
+        if Path::new(&commit_path).exists() {
+            std::fs::remove_dir_all(&commit_path)
+                .map_err(|e| format!("Failed to delete commit directory {}: {}", commit_path, e))?;
+        } else {
+            tracing::warn!("Commit directory {} does not exist", commit_path);
+        }
+
+        Ok(())
+    }
+
     /// Register a single object in the object database
     #[tracing::instrument(skip(self, commit_id, object_id), level = "trace")]
     pub fn register_object(&self, commit_id: &str, object_id: &str) -> Result<(), String> {
@@ -467,6 +506,41 @@ impl Store {
                 .map_err(|e| format!("Failed to get metadata for object {}: {}", object_id, e))?;
         self.object_database
             .register_object(object_id, object_file_meta.len(), Some(commit_id));
+        Ok(())
+    }
+
+    /// Unregister a single object from the object database
+    #[tracing::instrument(skip(self, object_id, commit_id), level = "trace")]
+    pub fn unregister_object(&self, object_id: &str, commit_id: &str) -> Result<(), String> {
+        tracing::debug!(
+            "Unregistering object {} for commit {}",
+            object_id,
+            commit_id
+        );
+        self.object_database
+            .unregister_object(object_id, commit_id)
+            .map_err(|e| format!("Failed to unregister object {}: {}", object_id, e))?;
+        Ok(())
+    }
+
+    /// Unregister all objects for a commit from the object database
+    #[tracing::instrument(skip(self, commit_id), level = "trace")]
+    pub fn unregister_objects(&self, commit_id: &str) -> Result<(), String> {
+        tracing::debug!("Unregistering all objects for commit {}", commit_id);
+
+        let commit_file = format!("{}/commit.cfs", self.commit_path(commit_id));
+        if !Path::new(&commit_file).exists() {
+            return Err(format!("Commit file not found: {}", commit_file));
+        }
+
+        // Get the list of objects in the commit file
+        let objects = self.composefs_info_objects(&commit_file)?;
+
+        // Unregister each object from the object database
+        for object_id in objects {
+            self.unregister_object(&object_id, commit_id)?;
+        }
+
         Ok(())
     }
 
@@ -934,9 +1008,14 @@ impl Store {
         // This avoids copying large files into RAM
         let dir_path_buf = Path::new(dir_path);
         let parent_dir = dir_path_buf.parent().unwrap_or(Path::new("/tmp"));
+        // remind to self: don't put this tempfile inside the scope of tempdir_in
+        // because it will be dropped before the overlayfs mount is created
+        
+        let ovl_mountpoint = tempfile::tempdir()
+            .map_err(|e| format!("Failed to create temporary overlayfs mount: {}", e))?;
 
         // First try creating temporary directory adjacent to the source directory
-        let (ovl_tmp, temp_upperdir, overlayfs_workdir, overlayfs_mountpoint) =
+        let (_ovl_tmp, temp_upperdir, overlayfs_workdir, overlayfs_mountpoint) =
             match tempfile::tempdir_in(parent_dir) {
                 Ok(tmp_dir) => {
                     tracing::debug!(
@@ -945,7 +1024,7 @@ impl Store {
                     );
 
                     // Create just the necessary subdirectories
-                    let mount_point = tmp_dir.path().join("overlayfs_mount");
+                    let mount_point = ovl_mountpoint.path().to_path_buf();
                     let work_dir = tmp_dir.path().join("workdir");
 
                     std::fs::create_dir_all(&mount_point)
@@ -1027,12 +1106,17 @@ impl Store {
 
             // Import the overlayfs mountpoint as a new commit with the base as parent
             // This will capture both the base commit and the patched upperdir content
-            self.commit_directory_bare(
+            let result = self.commit_directory_bare(
                 label,
                 &ovl_mount.get_mountpoint().to_string_lossy(),
                 Some(base_commit),
                 transient,
-            )?
+            );
+
+            // Explicitly drop the ovl_mount to ensure it's unmounted before we return
+            drop(ovl_mount);
+
+            result?
         };
 
         tracing::info!("Imported bare directory on top of commit {}", base_commit);

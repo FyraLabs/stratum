@@ -32,6 +32,11 @@ pub enum Commands {
         #[clap(long)]
         patch: Option<StratumRef>,
     },
+    Remove {
+        /// Stratum reference to remove (commit ID or tag)
+        #[clap(value_parser)]
+        stratum_ref: StratumRef,
+    },
 
     /// Create a tag pointing to a specific commit
     Tag {
@@ -53,6 +58,12 @@ pub enum Commands {
         /// The path to mount the stratum at (optional, will auto-generate if not provided)
         #[clap(value_parser)]
         mountpoint: Option<PathBuf>,
+    },
+
+    Unmount {
+        /// The path to unmount the stratum from
+        #[clap(value_parser)]
+        mountpoint: PathBuf,
     },
 
     /// Manage worktrees
@@ -177,12 +188,31 @@ impl Cli {
                 };
 
                 store.mount_ref(&stratum_ref, &mount_path, worktree)
-            }
+            },
+            Commands::Unmount { mountpoint } => {
+                tracing::info!("Unmounting stratum from {}", mountpoint.display());
+                store.unmount_ref(&mountpoint.to_string_lossy())
+                    .map_err(|e| format!("Failed to unmount stratum from '{}': {}", mountpoint.display(), e))?;
+                println!("Unmounted stratum from {}", mountpoint.display());
+                Ok(())
+            },
             Commands::Worktree(command) => {
                 // Delegate to the worktree command handler
                 command
                     .execute(&store)
                     .map_err(|e| format!("Worktree command failed: {}", e))
+            },
+            Commands::Remove { stratum_ref } => {
+                // todo: safety check: duplicate commits?
+                tracing::info!("Removing stratum reference: {:?}", stratum_ref);
+                let commit_id = stratum_ref.resolve_commit_id(&store).map_err(|e| {
+                    format!("Failed to resolve commit ID for '{:?}': {}", stratum_ref, e)
+                })?;
+                store
+                    .delete_commit(&commit_id)
+                    .map_err(|e| format!("Failed to remove stratum '{}': {}", stratum_ref, e))?;
+                println!("Removed stratum reference: {}", stratum_ref);
+                Ok(())
             }
         }
     }

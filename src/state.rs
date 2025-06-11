@@ -31,6 +31,8 @@ pub struct MountedStratum {
     /// Note: there should only be one read-write mount per stratum,
     /// mounted snapshots should always be read-only.
     pub read_only: bool,
+    /// Resolved path to the stratum commit
+    pub base_commit: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, Default)]
@@ -55,6 +57,15 @@ impl StateManager {
         let state_file = state_dir.join(Self::STATE_FILE);
 
         Ok(StateManager { state_file })
+    }
+
+    /// Check if any commit with  the given ID is currently mounted
+    pub fn get_commit_mounted(
+        &self,
+        commit_id: &str,
+    ) -> Result<bool, String> {
+        let state = self.load_state()?;
+        Ok(state.mounts.values().any(|m| m.base_commit == commit_id))
     }
 
     /// Load the current state from disk

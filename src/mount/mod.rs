@@ -172,8 +172,28 @@ impl EphemeralMount for TempOvlMount {
 
 impl Drop for TempOvlMount {
     fn drop(&mut self) {
-        // Collect all directories to sync
-        let mut dirs_to_sync = vec![&self.mountpoint, &self.upperdir];
+        // First unmount the filesystem
+        // First try with DETACH, which is less forceful
+        if let Err(e) = umount2(self.get_mountpoint(), MntFlags::MNT_DETACH) {
+            tracing::error!(
+                "Failed to unmount {} with MNT_DETACH: {}, trying with MNT_FORCE",
+                self.get_mountpoint().display(),
+                e
+            );
+
+            // If DETACH fails, try with FORCE
+            if let Err(e) = umount2(self.get_mountpoint(), MntFlags::MNT_FORCE) {
+                tracing::error!(
+                    "Failed to unmount {} with MNT_FORCE: {}",
+                    self.get_mountpoint().display(),
+                    e
+                );
+            }
+        }
+
+        // Now that the mountpoint is unmounted, sync the remaining directories
+        // Note: we exclude the mountpoint since it's already unmounted
+        let mut dirs_to_sync = vec![&self.upperdir];
         if let Some(workdir) = &self.workdir {
             dirs_to_sync.push(workdir);
         }
@@ -184,14 +204,6 @@ impl Drop for TempOvlMount {
             if let Err(e) = fsync_dir(dir) {
                 tracing::error!("Failed to fsync {}: {}", dir.display(), e);
             }
-        }
-
-        if let Err(e) = umount2(self.get_mountpoint(), MntFlags::MNT_EXPIRE) {
-            tracing::error!(
-                "Failed to unmount {}: {}",
-                self.get_mountpoint().display(),
-                e
-            );
         }
     }
 }
