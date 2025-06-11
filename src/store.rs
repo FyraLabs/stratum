@@ -566,7 +566,7 @@ impl Store {
     }
 
     /// Import a directory and create a content-addressed commit
-    /// 
+    ///
     /// Optionally has a `parent_commit` field that specifies
     /// how this commit was built from. Does not do anything other than metadata.
     /// See [`Self::union_patch_commit`] for actually merging commits
@@ -694,6 +694,21 @@ impl Store {
             .map_err(|e| e.to_string())?;
 
         tracing::info!("Tagged commit {} as {}:{}", commit_id, label, tag);
+        Ok(())
+    }
+
+    pub fn untag(&self, tag: &str, label: &str) -> Result<(), String> {
+        let tag_symlink = format!("{}/{}", Self::TAGS_DIR, tag);
+
+        if !Path::new(&tag_symlink).exists() {
+            return Err(format!("Tag {}:{} does not exist", label, tag));
+        }
+
+        // Remove the symlink
+        std::fs::remove_file(&tag_symlink)
+            .map_err(|e| format!("Failed to remove tag symlink: {}", e))?;
+
+        tracing::info!("Untagged {}:{}", label, tag);
         Ok(())
     }
 

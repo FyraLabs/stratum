@@ -32,6 +32,8 @@ pub enum Commands {
         #[clap(long)]
         patch: Option<StratumRef>,
     },
+    #[clap(name = "remove", aliases = &["rm", "del", "delete", "r", "d"])]
+    /// Remove a stratum reference (commit ID or tag)
     Remove {
         /// Stratum reference to remove (commit ID or tag)
         #[clap(value_parser)]
@@ -39,6 +41,7 @@ pub enum Commands {
     },
 
     /// Create a tag pointing to a specific commit
+    #[clap(name = "tag", aliases = &["t"])]
     Tag {
         /// Source stratum reference (commit ID or existing tag)
         #[clap(value_parser)]
@@ -49,7 +52,15 @@ pub enum Commands {
         new_tag: String,
     },
 
+    #[clap(name = "untag", aliases = &["ut"])]
+    Untag {
+        #[clap(value_parser)]
+        /// The tag to remove
+        tag: String,
+    },
+
     /// Mount a stratum at a given path
+    #[clap(name = "mount", aliases = &["mnt", "m"])]
     Mount {
         /// The stratum reference to mount (supports format: stratum_ref:tag or stratum_ref+worktree)
         #[clap(value_parser)]
@@ -60,6 +71,7 @@ pub enum Commands {
         mountpoint: Option<PathBuf>,
     },
 
+    #[clap(name = "unmount", aliases = &["umount", "um", "u", "umnt"])]
     Unmount {
         /// The path to unmount the stratum from
         #[clap(value_parser)]
@@ -67,7 +79,7 @@ pub enum Commands {
     },
 
     /// Manage worktrees
-    #[clap(subcommand)]
+    #[clap(subcommand, name = "worktree", alias = "wt")]
     Worktree(worktree::WorktreeCommand),
 }
 
@@ -153,6 +165,20 @@ impl Cli {
                     .tag_commit(&target_label, &commit_id, &target_tag)
                     .map_err(|e| format!("Failed to tag commit '{}': {}", commit_id, e))?;
                 println!("Tagged commit {} with '{}'", commit_id, new_tag);
+                Ok(())
+            }
+            Commands::Untag { tag } => {
+                let (label, tag_name) = util::parse_label(&tag)
+                    .map_err(|e| format!("Failed to parse tag '{}': {}", tag, e))?;
+                let tag_name = tag_name.ok_or_else(|| {
+                    "No tag provided, please provide in form of volume:tag".to_string()
+                })?;
+
+                tracing::info!("Removing tag '{}'", tag);
+                store
+                    .untag(&tag_name, &label)
+                    .map_err(|e| format!("Failed to remove tag '{}': {}", tag, e))?;
+                println!("Removed tag '{}'", tag);
                 Ok(())
             }
             Commands::Mount {
