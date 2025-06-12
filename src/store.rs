@@ -1745,7 +1745,9 @@ impl Store {
     // todo: port to native composefs-rs API
 
     /// Create composefs file for a commit
+    #[tracing::instrument(skip_all)]
     fn create_composefs_file(&self, commit_id: &str, dir_path: &str) -> Result<String, String> {
+        tracing::info!("Creating ComposeFS file for commit {}", commit_id);
         fsync_all_walk(
             &Path::new(dir_path).canonicalize().map_err(|e| {
                 format!("Failed to canonicalize directory path {}: {}", dir_path, e)
