@@ -52,13 +52,13 @@ pub fn derive_hash(left: &[u8], right: &[u8]) -> [u8; 32] {
 
 /// Calculates a SHA256 hash for the entire directory tree rooted at `dir_path`.
 ///
-/// The hash is derived from the names of files and directories, file metadata
-/// (size and modification time), and the structure of the directory tree.
-/// This approach is much faster than hashing file contents for large trees.
+/// The hash is derived from file content, metadata (size, permissions, ownership),
+/// relative paths, and the structure of the directory tree. This provides strong
+/// integrity guarantees by hashing actual file content along with metadata.
 /// Entries are processed in alphabetical order by name to ensure hash consistency.
 ///
 /// Symlinks are followed; if they point to a directory, it's traversed, if to a file,
-/// its metadata is read. This could lead to issues with symlink loops in complex scenarios.
+/// its content and metadata are hashed. This could lead to issues with symlink loops.
 ///
 /// # Arguments
 ///
@@ -67,7 +67,7 @@ pub fn derive_hash(left: &[u8], right: &[u8]) -> [u8; 32] {
 /// # Errors
 ///
 /// Returns `std::io::Error` if the path is not a directory, or if any I/O error
-/// occurs during traversal or metadata reading.
+/// occurs during traversal, metadata reading, or file content reading.
 #[tracing::instrument(level = "trace")]
 pub fn hash_directory_tree(dir_path: &Path) -> io::Result<[u8; 32]> {
     if !dir_path.is_dir() {
@@ -77,12 +77,20 @@ pub fn hash_directory_tree(dir_path: &Path) -> io::Result<[u8; 32]> {
         ));
     }
 
-    tracing::trace!(?dir_path, "Calculating metadata hash for directory tree");
-    calculate_dir_hash(dir_path)
+    tracing::trace!(
+        ?dir_path,
+        "Calculating content-based hash for directory tree"
+    );
+    calculate_dir_hash(dir_path, dir_path)
 }
 
-/// Helper function to recursively calculate the hash of a directory's metadata.
-fn calculate_dir_hash(dir_path: &Path) -> io::Result<[u8; 32]> {
+/// Helper function to recursively calculate the hash of a directory's content and metadata.
+///
+/// This function now hashes file content along with metadata, relative paths, and attributes
+/// to provide stronger integrity guarantees for commit IDs.
+fn calculate_dir_hash(dir_path: &Path, root_path: &Path) -> io::Result<[u8; 32]> {
+    use std::os::unix::fs::MetadataExt;
+
     let mut hasher = Sha256::new();
 
     let mut entries = fs::read_dir(dir_path)?.collect::<Result<Vec<_>, io::Error>>()?;
@@ -94,44 +102,66 @@ fn calculate_dir_hash(dir_path: &Path) -> io::Result<[u8; 32]> {
         let path = entry.path();
         let file_name = entry.file_name();
 
-        // Hash the entry's name
-        tracing::trace!(?file_name, ?path, "Hashing entry name");
-        hasher.update(file_name.to_string_lossy().as_bytes());
+        // Calculate relative path from the root directory
+        let relative_path = path.strip_prefix(root_path).unwrap_or(&path);
+
+        // Hash the relative path for unique identification within the tree
+        tracing::trace!(?file_name, ?path, ?relative_path, "Hashing entry");
+        hasher.update(relative_path.to_string_lossy().as_bytes());
+        hasher.update([0]); // Separator between path and content
 
         let metadata = fs::metadata(&path)?; // Follows symlinks
 
         if metadata.is_dir() {
             tracing::trace!(?path, "Processing directory");
             hasher.update(b"DIR"); // Type marker for directory
-            let subdir_hash = calculate_dir_hash(&path)?; // Recursive call for subdirectory
+
+            // Hash directory metadata
+            hasher.update(metadata.mode().to_le_bytes()); // Permissions
+            hasher.update(metadata.uid().to_le_bytes()); // Owner UID
+            hasher.update(metadata.gid().to_le_bytes()); // Owner GID
+
+            let subdir_hash = calculate_dir_hash(&path, root_path)?; // Recursive call for subdirectory
             tracing::trace!(?path, hash = %hex::encode(subdir_hash), "Subdirectory hash");
             hasher.update(subdir_hash); // Update with the hash of the subdirectory
         } else if metadata.is_file() {
-            tracing::trace!(?path, "Processing file metadata");
+            tracing::trace!(?path, "Processing file content and metadata");
             hasher.update(b"FILE"); // Type marker for file
 
-            // Hash file size
-            hasher.update(metadata.len().to_le_bytes());
+            // Hash file metadata (permissions, ownership, size)
+            hasher.update(metadata.mode().to_le_bytes()); // Permissions
+            hasher.update(metadata.uid().to_le_bytes()); // Owner UID
+            hasher.update(metadata.gid().to_le_bytes()); // Owner GID
+            hasher.update(metadata.len().to_le_bytes()); // File size
 
-            // NOTE: We intentionally exclude modification time (mtime) from the hash
-            // to ensure deterministic commit IDs. File content and size are sufficient
-            // for identifying changes, while including timestamps would make
-            // commits non-reproducible across different build environments.
+            // Hash the actual file content for stronger integrity
+            let file_content = fs::read(&path)?;
+            hasher.update(&file_content);
 
             tracing::trace!(
                 ?path,
                 size = metadata.len(),
-                "Hashed file metadata (excluding mtime for determinism)"
+                content_size = file_content.len(),
+                mode = format!("{:o}", metadata.mode()),
+                uid = metadata.uid(),
+                gid = metadata.gid(),
+                "Hashed file content and metadata"
             );
         } else {
-            tracing::trace!(?path, "Ignoring non-file, non-directory entry");
+            tracing::trace!(?path, "Processing other entry type");
+            hasher.update(b"OTHER"); // Type marker for other entry types
+
+            // Hash basic metadata for other types (symlinks, devices, etc.)
+            hasher.update(metadata.mode().to_le_bytes());
+            hasher.update(metadata.uid().to_le_bytes());
+            hasher.update(metadata.gid().to_le_bytes());
         }
     }
 
     let result = hasher.finalize();
     let mut hash_array = [0u8; 32];
     hash_array.copy_from_slice(result.as_slice());
-    tracing::trace!(?dir_path, hash = %hex::encode(hash_array), "Directory hash calculated");
+    tracing::trace!(?dir_path, hash = %hex::encode(hash_array), "Directory content hash calculated");
     Ok(hash_array)
 }
 

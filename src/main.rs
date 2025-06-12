@@ -10,11 +10,21 @@ mod util;
 #[cfg(debug_assertions)]
 const MAX_LEVEL: tracing::Level = tracing::Level::TRACE;
 #[cfg(not(debug_assertions))]
-const MAX_LEVEL: tracing::Level = tracing::Level::ERROR;
+const MAX_LEVEL: tracing::Level = tracing::Level::TRACE;
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_max_level(MAX_LEVEL)
+    // Configure tracing with specific crate filtering
+    use tracing_subscriber::{filter::EnvFilter, fmt, prelude::*};
+
+    // Create a filter that allows our max level but silences sled
+    let filter = EnvFilter::builder()
+        .with_default_directive(MAX_LEVEL.into())
+        .from_env_lossy()
+        .add_directive("sled=off".parse().unwrap());
+
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(filter)
         .init();
 
     let cli = cli::Cli::parse();

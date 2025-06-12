@@ -514,10 +514,8 @@ impl Store {
                     worktree_name
                 );
 
-                // Ensure the worktree exists, creating main worktree if it doesn't exist
-                if worktree_name == Self::DEFAULT_WORKTREE {
-                    self.ensure_main_worktree(label, &cid)?;
-                } else if !self.worktree_exists(label, worktree_name) {
+                // Ensure the worktree exists
+                if !self.worktree_exists(label, worktree_name) {
                     return Err(format!(
                         "Worktree {}:{} does not exist",
                         label, worktree_name
@@ -992,17 +990,6 @@ impl Store {
             );
         }
 
-        // Create the main worktree if this is the first commit (no parent)
-
-        if !transient && parent_commit.is_none() {
-            self.ensure_main_worktree(label, &commit_id)?;
-            tracing::debug!(
-                "Created main worktree for new stratum {}:{}",
-                label,
-                commit_id
-            );
-        }
-
         Ok(commit_id)
     }
 
@@ -1295,11 +1282,6 @@ impl Store {
 
     /// Remove a worktree (must be unmounted first)
     pub fn remove_worktree(&self, label: &str, worktree_name: &str) -> Result<(), String> {
-        // Prevent removal of the main worktree
-        if worktree_name == Self::DEFAULT_WORKTREE {
-            return Err("Cannot remove the main worktree".to_string());
-        }
-
         // Check if worktree exists
         if !self.worktree_exists(label, worktree_name) {
             return Err(format!(
@@ -1614,6 +1596,10 @@ impl Store {
     }
 
     /// Recursively collect file chunks from directory
+    ///
+    /// This function now hashes actual file content instead of just metadata
+    /// to provide stronger integrity guarantees and better deduplication.
+    /// Note: This makes importing slower as all file content must be read.
     fn collect_chunks_recursive(
         &self,
         dir: &Path,
@@ -1634,22 +1620,34 @@ impl Store {
             if path.is_dir() {
                 self.collect_chunks_recursive(&path, chunks)?;
             } else if path.is_file() {
-                // Create chunk from path + metadata (for consistency with hash_directory_tree)
+                // Create chunk from path + file content hash for stronger integrity
                 let mut chunk = Vec::new();
+
+                // Include the relative path for identification
                 chunk.extend_from_slice(relative_path.to_string_lossy().as_bytes());
+                chunk.push(0); // separator between path and content
 
-                let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
-                chunk.extend_from_slice(&metadata.len().to_le_bytes());
+                // Read and hash the actual file content
+                let file_content = std::fs::read(&path)
+                    .map_err(|e| format!("Failed to read file {}: {}", path.display(), e))?;
 
-                let mtime = metadata
-                    .modified()
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                chunk.extend_from_slice(&mtime.to_le_bytes());
+                // Use SHA256 to hash the file content
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(&file_content);
+                let content_hash = hasher.finalize();
+
+                // Append the content hash to the chunk
+                chunk.extend_from_slice(&content_hash);
 
                 chunks.push(chunk);
+
+                tracing::debug!(
+                    path = %path.display(),
+                    size = file_content.len(),
+                    content_hash = %hex::encode(content_hash),
+                    "Hashed file content for merkle tree"
+                );
             }
         }
 
@@ -1687,6 +1685,9 @@ impl Store {
             .arg(format!("--digest-store={}", self.objects_path()))
             .arg(dir_path)
             .arg(&commit_file)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .output()
             .map_err(|e| e.to_string())?;
 
@@ -1712,6 +1713,9 @@ impl Store {
         let output = std::process::Command::new("composefs-info")
             .arg("objects")
             .arg(file)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .output()
             .map_err(|e| e.to_string())?;
 
@@ -1744,6 +1748,9 @@ impl Store {
             .arg(format!("--basedir={}", self.objects_path()))
             .arg("missing-objects")
             .arg(file)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .output()
             .map_err(|e| e.to_string())?;
 
