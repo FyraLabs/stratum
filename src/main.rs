@@ -10,7 +10,7 @@ mod util;
 #[cfg(debug_assertions)]
 const MAX_LEVEL: tracing::Level = tracing::Level::TRACE;
 #[cfg(not(debug_assertions))]
-const MAX_LEVEL: tracing::Level = tracing::Level::TRACE;
+const MAX_LEVEL: tracing::Level = tracing::Level::ERROR;
 
 fn main() {
     // Configure tracing with specific crate filtering
