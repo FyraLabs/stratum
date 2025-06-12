@@ -88,7 +88,7 @@ pub fn hash_directory_tree(dir_path: &Path) -> io::Result<[u8; 32]> {
 ///
 /// This function now hashes file content along with metadata, relative paths, and attributes
 /// to provide stronger integrity guarantees for commit IDs.
-fn calculate_dir_hash(dir_path: &Path, root_path: &Path) -> io::Result<[u8; 32]> {
+pub fn calculate_dir_hash(dir_path: &Path, root_path: &Path) -> io::Result<[u8; 32]> {
     use std::os::unix::fs::MetadataExt;
 
     let mut hasher = Sha256::new();
@@ -339,6 +339,297 @@ pub fn verify_merkle_proof(
 
     // Verify the proof
     merkle_proof.verify(*root_hash, &[leaf_index], &[leaf_hash], tree_size)
+}
+
+/// Copy a directory recursively, preserving all metadata including permissions,
+/// ownership, timestamps, and extended attributes.
+pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
+    let src_path = src.as_ref();
+    let dst_path = dst.as_ref();
+
+    tracing::debug!(
+        "Copying directory from {} to {} (preserving all metadata)",
+        src_path.display(),
+        dst_path.display()
+    );
+
+    // Create destination directory and copy its metadata
+    fs::create_dir_all(&dst)?;
+    copy_metadata(src_path, dst_path)?;
+
+    for entry in fs::read_dir(src_path)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let path = entry.path();
+        let filename = path.file_name().unwrap();
+        let target = dst.as_ref().join(filename);
+
+        if ty.is_dir() {
+            copy_dir_all(&path, &target)?;
+        } else if ty.is_file() {
+            tracing::trace!("Copying file {} to {}", path.display(), target.display());
+            copy_file_with_metadata(&path, &target)?;
+        } else if ty.is_symlink() {
+            tracing::trace!("Copying symlink {} to {}", path.display(), target.display());
+            copy_symlink(&path, &target)?;
+        } else {
+            tracing::warn!("Skipping special file: {}", path.display());
+        }
+    }
+
+    tracing::debug!(
+        "Finished copying directory from {} to {}",
+        src_path.display(),
+        dst_path.display()
+    );
+    Ok(())
+}
+
+/// Copy a file and preserve all its metadata
+fn copy_file_with_metadata(src: &Path, dst: &Path) -> io::Result<()> {
+    // Copy file content
+    fs::copy(src, dst)?;
+
+    // Copy all metadata
+    copy_metadata(src, dst)?;
+
+    Ok(())
+}
+
+/// Copy a symlink and preserve its metadata
+fn copy_symlink(src: &Path, dst: &Path) -> io::Result<()> {
+    let link_target = fs::read_link(src)?;
+
+    // Remove destination if it exists
+    let _ = fs::remove_file(dst);
+
+    // Create the symlink
+    std::os::unix::fs::symlink(&link_target, dst)?;
+
+    // Note: We don't copy metadata for symlinks as it's usually not needed
+    // and can cause issues. The symlink itself inherits the metadata.
+
+    Ok(())
+}
+
+/// Copy all metadata from source to destination, including permissions, ownership,
+/// timestamps, and extended attributes
+fn copy_metadata(src: &Path, dst: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = src.metadata()?;
+
+    // Copy permissions
+    let permissions = fs::Permissions::from_mode(metadata.mode());
+    fs::set_permissions(dst, permissions)?;
+
+    // Copy timestamps (access time and modification time)
+    if let (Ok(atime), Ok(mtime)) = (metadata.accessed(), metadata.modified()) {
+        // Use libc to set both times atomically
+        let atime_spec = timespec_from_systemtime(atime);
+        let mtime_spec = timespec_from_systemtime(mtime);
+
+        unsafe {
+            let path_cstr = std::ffi::CString::new(dst.as_os_str().as_encoded_bytes())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid path"))?;
+
+            let times = [atime_spec, mtime_spec];
+            if libc::utimensat(libc::AT_FDCWD, path_cstr.as_ptr(), times.as_ptr(), 0) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+
+    // Copy ownership (requires appropriate privileges)
+    // This will silently fail if we don't have permission, which is usually fine
+    unsafe {
+        let path_cstr = std::ffi::CString::new(dst.as_os_str().as_encoded_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid path"))?;
+
+        // Try to set ownership, but don't fail if we can't
+        let _ = libc::chown(path_cstr.as_ptr(), metadata.uid(), metadata.gid());
+    }
+
+    // Copy extended attributes
+    copy_xattrs(src, dst)?;
+
+    Ok(())
+}
+
+/// Copy extended attributes from source to destination
+fn copy_xattrs(src: &Path, dst: &Path) -> io::Result<()> {
+    // List all extended attributes on the source
+    let src_cstr = std::ffi::CString::new(src.as_os_str().as_encoded_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid source path"))?;
+    let dst_cstr = std::ffi::CString::new(dst.as_os_str().as_encoded_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid destination path"))?;
+
+    unsafe {
+        // Get the size of the attribute list
+        let list_size = libc::listxattr(src_cstr.as_ptr(), std::ptr::null_mut(), 0);
+        if list_size < 0 {
+            let err = io::Error::last_os_error();
+            // ENOTSUP means the filesystem doesn't support xattrs, which is fine
+            if err.raw_os_error() == Some(libc::ENOTSUP) {
+                return Ok(());
+            }
+            return Err(err);
+        }
+
+        if list_size == 0 {
+            return Ok(()); // No extended attributes
+        }
+
+        // Get the attribute list
+        let mut attr_list = vec![0u8; list_size as usize];
+        let actual_size = libc::listxattr(
+            src_cstr.as_ptr(),
+            attr_list.as_mut_ptr() as *mut i8,
+            list_size as usize,
+        );
+        if actual_size < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Parse and copy each attribute
+        let mut offset = 0;
+        while offset < actual_size as usize {
+            // Find the null terminator for this attribute name
+            let name_end = attr_list[offset..]
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(0)
+                + offset;
+
+            if name_end > offset {
+                let attr_name = std::ffi::CStr::from_bytes_with_nul(&attr_list[offset..=name_end])
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidData, "Invalid xattr name")
+                    })?;
+
+                // Get the attribute value size
+                let value_size = libc::getxattr(
+                    src_cstr.as_ptr(),
+                    attr_name.as_ptr(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+                if value_size >= 0 {
+                    if value_size == 0 {
+                        // Empty attribute value
+                        let result = libc::setxattr(
+                            dst_cstr.as_ptr(),
+                            attr_name.as_ptr(),
+                            std::ptr::null(),
+                            0,
+                            0,
+                        );
+                        if result < 0 {
+                            let err = io::Error::last_os_error();
+                            tracing::warn!(
+                                "Failed to copy xattr {}: {}",
+                                attr_name.to_string_lossy(),
+                                err
+                            );
+                        }
+                    } else {
+                        // Get and set the attribute value
+                        let mut value = vec![0u8; value_size as usize];
+                        let actual_value_size = libc::getxattr(
+                            src_cstr.as_ptr(),
+                            attr_name.as_ptr(),
+                            value.as_mut_ptr() as *mut libc::c_void,
+                            value_size as usize,
+                        );
+
+                        if actual_value_size >= 0 {
+                            let result = libc::setxattr(
+                                dst_cstr.as_ptr(),
+                                attr_name.as_ptr(),
+                                value.as_ptr() as *const libc::c_void,
+                                actual_value_size as usize,
+                                0,
+                            );
+                            if result < 0 {
+                                let err = io::Error::last_os_error();
+                                tracing::warn!(
+                                    "Failed to copy xattr {}: {}",
+                                    attr_name.to_string_lossy(),
+                                    err
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            offset = name_end + 1;
+        }
+    }
+
+    Ok(())
+}
+
+/// Convert SystemTime to libc::timespec
+pub fn timespec_from_systemtime(time: std::time::SystemTime) -> libc::timespec {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => libc::timespec {
+            tv_sec: duration.as_secs() as libc::time_t,
+            tv_nsec: duration.subsec_nanos() as libc::c_long,
+        },
+        Err(_) => libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+    }
+}
+/// Calculate total size of directory
+pub fn calculate_total_size(dir_path: &str) -> Result<u64, String> {
+    let path = Path::new(dir_path);
+    if !path.is_dir() {
+        return Err("Path is not a directory".to_string());
+    }
+
+    let mut total_size = 0u64;
+    calculate_size_recursive(path, &mut total_size)?;
+    Ok(total_size)
+}
+
+/// Recursively calculate directory size
+pub fn calculate_size_recursive(dir: &Path, total_size: &mut u64) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            calculate_size_recursive(&path, total_size)?;
+        } else if path.is_file() {
+            let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+            *total_size += metadata.len();
+        }
+    }
+
+    Ok(())
+}
+pub fn fsync_all_walk(dir: &Path) -> io::Result<()> {
+    tracing::trace!("Running fsync() on {}", dir.display());
+    let walker = jwalk::WalkDir::new(dir);
+    for entry in walker {
+        let entry = entry?;
+        if let Some(parent) = entry.path().parent() {
+            {
+                let file = std::fs::File::open(entry.path())?;
+                rustix::fs::fsync(&file)?;
+            }
+            {
+                let parent_dir = std::fs::File::open(parent)?;
+                rustix::fs::fsync(&parent_dir)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

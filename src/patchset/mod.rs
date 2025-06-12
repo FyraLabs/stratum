@@ -13,10 +13,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    commit::StratumRef,
-    store::{Store, copy_dir_all},
-};
+use crate::{commit::StratumRef, store::Store, util::copy_dir_all};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 
@@ -223,7 +220,7 @@ impl Patchset {
             store
                 .tag_commit(
                     &label,
-                    &final_commit.as_ref().unwrap(),
+                    final_commit.as_ref().unwrap(),
                     &tag.unwrap_or_else(|| {
                         tracing::warn!("No tag specified, using 'latest' as default");
                         "latest".to_string()
