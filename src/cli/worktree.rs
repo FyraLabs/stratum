@@ -36,6 +36,12 @@ pub enum WorktreeCommand {
         /// Name of the worktree to remove
         name: StratumRef,
     },
+
+    /// Rebase a worktree to a new base commit
+    Rebase {
+        worktree: StratumRef,
+        new_commit: StratumRef,
+    },
 }
 impl WorktreeCommand {
     /// Execute the worktree command
@@ -98,6 +104,21 @@ impl WorktreeCommand {
                     }
                 };
                 store.remove_worktree(&label, &worktree_name)
+            }
+            WorktreeCommand::Rebase {
+                worktree,
+                new_commit,
+            } => {
+                let (label, worktree_name) = match worktree {
+                    StratumRef::Worktree { label, worktree } => (label, worktree),
+                    _ => {
+                        return Err(
+                            "Invalid worktree name format. Use 'label+worktree_name'.".to_string()
+                        );
+                    }
+                };
+
+                store.rebase_worktree(&label, &worktree_name, &new_commit)
             }
         }
     }

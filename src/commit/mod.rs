@@ -181,6 +181,10 @@ impl Worktree {
         &self.worktree.base_commit
     }
 
+    pub fn set_base_commit(&mut self, base_commit: String) {
+        self.worktree.base_commit = base_commit;
+    }
+
     /// Updates the last committed timestamp
     pub fn mark_committed(&mut self) {
         self.worktree.last_committed = Some(chrono::Utc::now());

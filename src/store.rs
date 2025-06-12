@@ -5,6 +5,7 @@
 //!
 //! This is similar to composefs-rs' `Repository` type.
 
+use file_lock::FileLock;
 use tempfile::TempDir;
 
 use crate::{
@@ -339,16 +340,16 @@ impl Store {
         let path = format!("{}/{}", self.base_path, Self::TEMP_DIR);
         std::fs::create_dir_all(&path).ok();
 
-        // Sync the temp directory to ensure it's written to disk
-        if let Some(parent) = Path::new(&path).parent() {
-            if let Err(e) = fsync_all_walk(parent) {
-                tracing::warn!(
-                    "Failed to fsync temp parent directory {}: {}",
-                    parent.display(),
-                    e
-                );
-            }
-        }
+        // // Sync the temp directory to ensure it's written to disk
+        // if let Some(parent) = Path::new(&path).parent() {
+        //     if let Err(e) = fsync_all_walk(parent) {
+        //         tracing::warn!(
+        //             "Failed to fsync temp parent directory {}: {}",
+        //             parent.display(),
+        //             e
+        //         );
+        //     }
+        // }
 
         path
     }
@@ -462,28 +463,59 @@ impl Store {
             .resolve_commit_id(self)
             .map_err(|e| format!("Failed to resolve commit ID: {}", e))?;
 
+        let actual_mountpoint = PathBuf::from(mountpoint);
+
+        // Check if the destination is already a mountpoint
+        let already_mountpoint = match mountpoints::mountpaths() {
+            Ok(mountpaths) => {
+                let canonical_mountpoint = Path::new(mountpoint).canonicalize().map_err(|e| {
+                    format!("Failed to canonicalize mountpoint {}: {}", mountpoint, e)
+                })?;
+                mountpaths.iter().any(|p| p == &canonical_mountpoint)
+            }
+            Err(e) => return Err(format!("Failed to get current mountpoints: {}", e)),
+        };
+
+        // If it's already a mount point, unmount it first
+        if already_mountpoint {
+            tracing::info!(
+                "Target {} is already a mountpoint, unmounting first",
+                mountpoint
+            );
+            // Try to unmount using the standard unmount method
+            if let Err(e) = self.unmount_ref(mountpoint) {
+                tracing::warn!("Failed to unmount existing mount at {}: {}", mountpoint, e);
+                // If unmount fails due to state manager issues, try a force unmount
+                tracing::info!("Attempting force unmount at {}", mountpoint);
+                if let Err(e) = crate::mount::composefs::unmount_composefs_at(Path::new(mountpoint))
+                {
+                    return Err(format!(
+                        "Failed to force unmount existing mount at {}: {}",
+                        mountpoint, e
+                    ));
+                }
+            }
+        }
+
+        // After unmounting (if needed), we can use the actual mountpoint directly
+        let mounted_mp = actual_mountpoint.clone();
+
         // Create mountpoint if it doesn't exist
         std::fs::create_dir_all(mountpoint)
             .map_err(|e| format!("Failed to create mountpoint {}: {}", mountpoint, e))?;
 
-        // Sync the mountpoint parent directory to ensure it's written to disk
-        if let Some(parent) = Path::new(mountpoint).parent() {
-            if let Err(e) = fsync_all_walk(parent) {
-                tracing::warn!(
-                    "Failed to fsync mountpoint parent directory {}: {}",
-                    parent.display(),
-                    e
-                );
-            }
-        }
-
         // Canonicalize the mount path for consistent storage
-        let canonical_mountpoint = std::fs::canonicalize(mountpoint)
-            .map_err(|e| format!("Failed to canonicalize mountpoint {}: {}", mountpoint, e))?;
+        let canonical_mountpoint = std::fs::canonicalize(&mounted_mp).map_err(|e| {
+            format!(
+                "Failed to canonicalize mountpoint {}: {}",
+                mounted_mp.display(),
+                e
+            )
+        })?;
 
         // Check if already mounted
-        if self.is_mounted(mountpoint)? {
-            tracing::info!("Already mounted at {}", mountpoint);
+        if self.is_mounted(&mounted_mp.to_string_lossy())? {
+            tracing::info!("Already mounted at {}", mounted_mp.display());
             return Ok(());
         }
 
@@ -510,7 +542,7 @@ impl Store {
                     "Mounting ref {:?} (commit: {}) at {} with worktree: {}",
                     sref,
                     cid,
-                    mountpoint,
+                    mounted_mp.display(),
                     worktree_name
                 );
 
@@ -539,12 +571,9 @@ impl Store {
                     .with_source_name(source_name);
 
                 // Mount using native implementation
-                tracing::debug!("Mounting writable composefs at {}", mountpoint);
-                crate::mount::composefs::mount_composefs_persistent_at(
-                    &config,
-                    Path::new(mountpoint),
-                )
-                .map_err(|e| format!("Failed to mount composefs: {}", e))?;
+                tracing::debug!("Mounting writable composefs at {}", mounted_mp.display());
+                crate::mount::composefs::mount_composefs_persistent_at(&config, &mounted_mp)
+                    .map_err(|e| format!("Failed to mount composefs: {}", e))?;
 
                 // Update state manager with mount information using canonical path
                 let mounted_stratum = crate::state::MountedStratum {
@@ -561,19 +590,19 @@ impl Store {
                     .add_mount(canonical_mountpoint.clone(), mounted_stratum)?;
 
                 tracing::info!(
-                    "Successfully mounted {} at {} using native implementation (worktree: {})",
+                    "Successfully mounted {} at {:?} using native implementation (worktree: {})",
                     cid,
-                    mountpoint,
+                    mounted_mp,
                     worktree_name
                 );
             }
             None => {
                 // Read-only mount without worktree
                 tracing::debug!(
-                    "Mounting ref {:?} (commit: {}) at {} as read-only",
+                    "Mounting ref {:?} (commit: {}) at {:?} as read-only",
                     sref,
                     cid,
-                    mountpoint
+                    mounted_mp
                 );
 
                 let source_name = format!("stratum:{}", sref);
@@ -589,12 +618,9 @@ impl Store {
                     .with_source_name(source_name);
 
                 // Mount using native implementation
-                tracing::debug!("Mounting read-only composefs at {}", mountpoint);
-                crate::mount::composefs::mount_composefs_persistent_at(
-                    &config,
-                    Path::new(mountpoint),
-                )
-                .map_err(|e| format!("Failed to mount composefs: {}", e))?;
+                tracing::debug!("Mounting read-only composefs at {:?}", mounted_mp);
+                crate::mount::composefs::mount_composefs_persistent_at(&config, &mounted_mp)
+                    .map_err(|e| format!("Failed to mount composefs: {}", e))?;
 
                 // Update state manager with mount information using canonical path
                 let mounted_stratum = crate::state::MountedStratum {
@@ -607,9 +633,9 @@ impl Store {
                     .add_mount(canonical_mountpoint, mounted_stratum)?;
 
                 tracing::info!(
-                    "Successfully mounted {} at {} using native implementation (read-only)",
+                    "Successfully mounted {} at {:?} using native implementation (read-only)",
                     cid,
-                    mountpoint
+                    mounted_mp
                 );
             }
         }
@@ -639,17 +665,6 @@ impl Store {
         // Create mountpoint if it doesn't exist
         std::fs::create_dir_all(mountpoint)
             .map_err(|e| format!("Failed to create mountpoint {}: {}", mountpoint, e))?;
-
-        // Sync the mountpoint parent directory to ensure it's written to disk
-        if let Some(parent) = Path::new(mountpoint).parent() {
-            if let Err(e) = fsync_all_walk(parent) {
-                tracing::warn!(
-                    "Failed to fsync ephemeral mountpoint parent directory {}: {}",
-                    parent.display(),
-                    e
-                );
-            }
-        }
 
         // Get the commit ID for the stratum reference
         let cid = sref
@@ -889,17 +904,6 @@ impl Store {
     ) -> Result<String, String> {
         // Ensure the base path exists
         std::fs::create_dir_all(&self.base_path).map_err(|e| e.to_string())?;
-
-        // Sync the base path parent to ensure it's written to disk
-        if let Some(parent) = Path::new(&self.base_path).parent() {
-            if let Err(e) = fsync_all_walk(parent) {
-                tracing::warn!(
-                    "Failed to fsync store base parent directory {}: {}",
-                    parent.display(),
-                    e
-                );
-            }
-        }
 
         // Collect file data for merkle tree
         let file_chunks = self.collect_file_chunks(dir_path)?;
@@ -1162,21 +1166,6 @@ impl Store {
         Ok(())
     }
 
-    /// Create the default 'main' worktree if it doesn't exist
-    ///
-    /// This ensures that every label has at least a main worktree to work with.
-    pub fn ensure_main_worktree(&self, label: &str, base_commit: &str) -> Result<(), String> {
-        if !self.worktree_exists(label, Self::DEFAULT_WORKTREE) {
-            self.create_worktree(
-                label,
-                Self::DEFAULT_WORKTREE,
-                base_commit,
-                Some("Default main worktree".to_string()),
-            )?;
-        }
-        Ok(())
-    }
-
     /// Check if a worktree exists
     pub fn worktree_exists(&self, label: &str, worktree_name: &str) -> bool {
         Path::new(&self.worktree_meta_path(label, worktree_name)).exists()
@@ -1372,6 +1361,90 @@ impl Store {
         }
 
         Ok(None)
+    }
+
+    /// Rebase a worktree to a new base commit
+    pub fn rebase_worktree(
+        &self,
+        label: &str,
+        worktree_name: &str,
+        new_base_commit: &StratumRef,
+    ) -> Result<(), String> {
+        // Load the existing worktree metadata
+        let mut current_worktree = self.load_worktree(label, worktree_name)?;
+
+        let new_base = match new_base_commit {
+            StratumRef::Tag(id) => self.resolve_tag(label, id)?,
+            StratumRef::Commit(id) => id.clone(),
+            StratumRef::Worktree { label, worktree } => {
+                tracing::warn!(
+                    "Worktree is selected as rebase target, will use that worktree's base commit instead"
+                );
+
+                let loaded_worktree = self.load_worktree(label, worktree)?;
+
+                if current_worktree == loaded_worktree {
+                    return Err("cannot rebase a worktree onto itself".to_string());
+                }
+                loaded_worktree.base_commit().to_string()
+            }
+        };
+
+        // Check if worktree is being mounted, if so remember the mount point and unmount it
+        let mut mount_path = None;
+        if self.is_worktree_mounted(label, worktree_name)? {
+            // Get the mount path before unmounting
+            mount_path = self.get_worktree_mount_path(label, worktree_name)?;
+
+            if let Some(path) = &mount_path {
+                tracing::info!(
+                    "Worktree {}:{} is currently mounted at {}, will unmount and remount after rebase",
+                    label,
+                    worktree_name,
+                    path.display()
+                );
+
+                // Unmount the worktree
+                self.unmount_ref(&path.to_string_lossy())?;
+            }
+        }
+
+        // Verify the new base commit exists
+        if !self.commit_exists(&new_base) {
+            return Err(format!("New base commit {} does not exist", new_base));
+        }
+
+        // Update the worktree's base commit
+        current_worktree.set_base_commit(new_base.to_string());
+
+        self.save_worktree_metadata(label, &current_worktree)?;
+        tracing::info!(
+            "Rebased worktree {}:{} to new base commit {}",
+            label,
+            worktree_name,
+            new_base
+        );
+
+        // Remount the worktree if it was mounted before
+        if let Some(path) = mount_path {
+            tracing::info!(
+                "Remounting worktree {}:{} at {}",
+                label,
+                worktree_name,
+                path.display()
+            );
+
+            // Create a StratumRef for the worktree
+            let sref = StratumRef::Worktree {
+                label: label.to_string(),
+                worktree: worktree_name.to_string(),
+            };
+
+            // Remount the worktree at the same path
+            self.mount_ref(&sref, &path.to_string_lossy(), Some(worktree_name))?;
+        }
+
+        Ok(())
     }
 
     // == End Worktree Management ==
