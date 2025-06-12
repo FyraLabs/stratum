@@ -1675,8 +1675,12 @@ impl Store {
 
     /// Create composefs file for a commit
     fn create_composefs_file(&self, commit_id: &str, dir_path: &str) -> Result<String, String> {
-        fsync_all_walk(Path::new(dir_path))
-            .map_err(|e| format!("Failed to fsync directory {}: {}", dir_path, e))?;
+        fsync_all_walk(
+            &Path::new(dir_path).canonicalize().map_err(|e| {
+                format!("Failed to canonicalize directory path {}: {}", dir_path, e)
+            })?,
+        )
+        .map_err(|e| format!("Failed to fsync directory {}: {}", dir_path, e))?;
         let commit_file = format!("{}/commit.cfs", self.commit_path(commit_id));
 
         let output = std::process::Command::new("mkcomposefs")

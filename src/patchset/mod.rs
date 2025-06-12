@@ -93,7 +93,7 @@ impl Patchset {
             let _eph_mount =
                 store.mount_ref_ephemeral(patch, &patch_mount.path().to_string_lossy())?;
 
-            copy_dir_all(&patch_mount, &copy_workdir)
+            copy_dir_all(patch_mount.path(), copy_workdir.path())
                 .map_err(|e| format!("Failed to copy directory: {}", e))?;
         }
 
