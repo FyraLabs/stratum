@@ -113,7 +113,11 @@ impl Cli {
                     );
                 }
 
-                if !directory.is_dir() {
+                // Use symlink_metadata to avoid following symlinks when checking if it's a directory
+                let metadata = std::fs::symlink_metadata(&directory).map_err(|e| {
+                    format!("Failed to read metadata for {}: {}", directory.display(), e)
+                })?;
+                if !metadata.is_dir() {
                     return Err(format!("{} is not a directory", directory.display()));
                 }
 

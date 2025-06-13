@@ -57,8 +57,13 @@ pub fn derive_hash(left: &[u8], right: &[u8]) -> [u8; 32] {
 /// integrity guarantees by hashing actual file content along with metadata.
 /// Entries are processed in alphabetical order by name to ensure hash consistency.
 ///
-/// Symlinks are followed; if they point to a directory, it's traversed, if to a file,
-/// its content and metadata are hashed. This could lead to issues with symlink loops.
+/// SAFETY MEASURES:
+/// - Symlinks are NOT followed; only the symlink target path is hashed, not the content
+///   it points to. This prevents issues with circular symlinks and infinite loops.
+/// - Special files (block devices, character devices, FIFOs, sockets) have only their
+///   metadata hashed, NEVER their contents. This prevents dangerous operations like
+///   reading from `/dev/sda` or blocking on `/dev/zero`.
+/// - Only regular files have their content read and hashed.
 ///
 /// # Arguments
 ///
@@ -70,7 +75,9 @@ pub fn derive_hash(left: &[u8], right: &[u8]) -> [u8; 32] {
 /// occurs during traversal, metadata reading, or file content reading.
 #[tracing::instrument(level = "trace")]
 pub fn hash_directory_tree(dir_path: &Path) -> io::Result<[u8; 32]> {
-    if !dir_path.is_dir() {
+    // Use symlink_metadata to avoid following symlinks when checking if it's a directory
+    let metadata = std::fs::symlink_metadata(dir_path)?;
+    if !metadata.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Input path is not a directory",
@@ -110,7 +117,7 @@ pub fn calculate_dir_hash(dir_path: &Path, root_path: &Path) -> io::Result<[u8; 
         hasher.update(relative_path.to_string_lossy().as_bytes());
         hasher.update([0]); // Separator between path and content
 
-        let metadata = fs::metadata(&path)?; // Follows symlinks
+        let metadata = fs::symlink_metadata(&path)?; // Does NOT follow symlinks
 
         if metadata.is_dir() {
             tracing::trace!(?path, "Processing directory");
@@ -147,14 +154,68 @@ pub fn calculate_dir_hash(dir_path: &Path, root_path: &Path) -> io::Result<[u8; 
                 gid = metadata.gid(),
                 "Hashed file content and metadata"
             );
-        } else {
-            tracing::trace!(?path, "Processing other entry type");
-            hasher.update(b"OTHER"); // Type marker for other entry types
+        } else if metadata.file_type().is_symlink() {
+            tracing::trace!(?path, "Processing symlink");
+            hasher.update(b"SYMLINK"); // Type marker for symlink
 
-            // Hash basic metadata for other types (symlinks, devices, etc.)
+            // Hash symlink metadata (permissions, ownership)
             hasher.update(metadata.mode().to_le_bytes());
             hasher.update(metadata.uid().to_le_bytes());
             hasher.update(metadata.gid().to_le_bytes());
+
+            // Hash the symlink target (not the content it points to)
+            match fs::read_link(&path) {
+                Ok(target) => {
+                    hasher.update(target.to_string_lossy().as_bytes());
+                    tracing::trace!(?path, ?target, "Hashed symlink target");
+                }
+                Err(e) => {
+                    tracing::warn!(?path, error = ?e, "Failed to read symlink target, skipping");
+                    hasher.update(b"BROKEN_SYMLINK");
+                }
+            }
+        } else {
+            // Handle special files (devices, fifos, sockets, etc.) by hashing ONLY their metadata
+            // Never attempt to read their contents as that could be dangerous or infinite
+
+            // Use mode bits to detect file types (Unix-compatible)
+            const S_IFBLK: u32 = 0o060000; // block device
+            const S_IFCHR: u32 = 0o020000; // character device  
+            const S_IFIFO: u32 = 0o010000; // FIFO (named pipe)
+            const S_IFSOCK: u32 = 0o140000; // socket
+            const S_IFMT: u32 = 0o170000; // file type mask
+
+            let file_type_bits = metadata.mode() & S_IFMT;
+
+            tracing::trace!(
+                ?path,
+                mode = format!("{:o}", metadata.mode()),
+                "Processing special file - metadata only"
+            );
+
+            if file_type_bits == S_IFBLK {
+                hasher.update(b"BLOCK_DEVICE");
+            } else if file_type_bits == S_IFCHR {
+                hasher.update(b"CHAR_DEVICE");
+            } else if file_type_bits == S_IFIFO {
+                hasher.update(b"FIFO");
+            } else if file_type_bits == S_IFSOCK {
+                hasher.update(b"SOCKET");
+            } else {
+                hasher.update(b"OTHER_SPECIAL");
+            }
+
+            // Hash only metadata for special files - NEVER read their contents
+            hasher.update(metadata.mode().to_le_bytes());
+            hasher.update(metadata.uid().to_le_bytes());
+            hasher.update(metadata.gid().to_le_bytes());
+            hasher.update(metadata.len().to_le_bytes()); // Size (if meaningful)
+
+            tracing::trace!(
+                ?path,
+                file_type_bits = format!("{:o}", file_type_bits),
+                "Hashed special file metadata only"
+            );
         }
     }
 
@@ -586,7 +647,10 @@ pub fn timespec_from_systemtime(time: std::time::SystemTime) -> libc::timespec {
 /// Calculate total size of directory
 pub fn calculate_total_size(dir_path: &str) -> Result<u64, String> {
     let path = Path::new(dir_path);
-    if !path.is_dir() {
+
+    // Use symlink_metadata to avoid following symlinks when checking if it's a directory
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !metadata.is_dir() {
         return Err("Path is not a directory".to_string());
     }
 
@@ -596,6 +660,10 @@ pub fn calculate_total_size(dir_path: &str) -> Result<u64, String> {
 }
 
 /// Recursively calculate directory size
+///
+/// This function safely handles symlinks by not following them - it will only
+/// count the size of the symlink itself, not its target. This prevents issues
+/// with recursive symlinks and ensures consistent behavior.
 pub fn calculate_size_recursive(dir: &Path, total_size: &mut u64) -> Result<(), String> {
     let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
 
@@ -603,29 +671,58 @@ pub fn calculate_size_recursive(dir: &Path, total_size: &mut u64) -> Result<(), 
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
 
-        if path.is_dir() {
+        // Use symlink_metadata to avoid following symlinks
+        let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+
+        if metadata.is_dir() {
+            // Only recurse into actual directories, not symlinked directories
             calculate_size_recursive(&path, total_size)?;
-        } else if path.is_file() {
-            let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+        } else if metadata.is_file() {
+            *total_size += metadata.len();
+        } else if metadata.file_type().is_symlink() {
+            // Count symlink size (typically very small)
             *total_size += metadata.len();
         }
+        // Ignore other special file types (devices, FIFOs, etc.)
     }
 
     Ok(())
 }
 pub fn fsync_all_walk(dir: &Path) -> io::Result<()> {
     tracing::trace!("Running fsync() on {}", dir.display());
-    let walker = jwalk::WalkDir::new(dir);
+
+    // Configure jwalk to not follow symlinks for safety
+    // This prevents issues with recursive symlinks like Wine's pfx directories
+    let walker = jwalk::WalkDir::new(dir).follow_links(false);
+
     for entry in walker {
         let entry = entry?;
-        if let Some(parent) = entry.path().parent() {
-            {
-                let file = std::fs::File::open(entry.path())?;
-                rustix::fs::fsync(&file)?;
+        let path = entry.path();
+
+        // Use symlink_metadata to check file type without following symlinks
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                // Only attempt to sync regular files and directories
+                if metadata.is_file() || metadata.is_dir() {
+                    match std::fs::File::open(&path) {
+                        Ok(file) => {
+                            if let Err(e) = rustix::fs::fsync(&file) {
+                                // Some files can't be synced (e.g., special mounts, device files)
+                                // Log as debug rather than warning to reduce noise
+                                tracing::debug!("Failed to sync {}: {}", path.display(), e);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("Failed to open {} for sync: {}", path.display(), e);
+                        }
+                    }
+                } else {
+                    // Skip symlinks, device files, FIFOs, sockets, etc.
+                    tracing::trace!("Skipping non-regular file for sync: {}", path.display());
+                }
             }
-            {
-                let parent_dir = std::fs::File::open(parent)?;
-                rustix::fs::fsync(&parent_dir)?;
+            Err(e) => {
+                tracing::debug!("Failed to get metadata for {}: {}", path.display(), e);
             }
         }
     }
