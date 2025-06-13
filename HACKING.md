@@ -15,7 +15,7 @@ Stratum is still currently in alpha, and there are various known issues and limi
   - Copy the contents of the commit to be merged into the upper layer of the base commit
   - Run `mkcomposefs` to create a new ComposeFS layer from the upper layer
   
-  This causes performance issues as it will copy the contents of the commit, and then proceed to recreate a new ComposeFS layer from the unified view, so performance will be `sum (N_total * log N_total + S_total)  for i = 1 to M`, where:
+  This causes performance issues as it will copy the contents of the commit, and then proceed to recreate a new ComposeFS layer from the unified view, so performance will be `O(N_total * log N_total + S_total)`, where:
   - N_total = total number of files across all commits being merged
   - S_total = total size (in bytes) of all files across all commits
   - M = number of commits being merged
