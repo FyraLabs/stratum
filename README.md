@@ -10,6 +10,13 @@
 
 Stratum allows you to create, mount, and commit layers of filesystems, allowing application state to be managed and tracked in a way that is easily content-addressable, efficient, yet robust. It allows you to mount multiple layers of filesystems as a single unified view, yet still retain the ability to keep track of changes, snapshots, and easily roll back to previous states if needed.
 
+> [!NOTE]
+> Stratum is currently in an **alpha** state, and is not yet stable for use in production.
+> There are still many features yet to be implemented, and the API may change in future releases.
+> However, it is already usable for testing and experimentation, and we welcome contributions and feedback from the community.
+>
+> See [HACKING.md](./HACKING.md) for a list of known issues and limitations.
+
 ## So, what *is* Stratum exactly?
 
 Think of Stratum as:
