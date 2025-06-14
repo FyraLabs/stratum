@@ -52,18 +52,15 @@ impl StateManager {
     pub fn new() -> Result<Self, String> {
         let state_dir = Path::new(Self::STATE_DIR);
         std::fs::create_dir_all(state_dir)
-            .map_err(|e| format!("Failed to create state directory: {}", e))?;
+            .map_err(|e| format!("Failed to create state directory: {e}"))?;
 
         let state_file = state_dir.join(Self::STATE_FILE);
 
-        Ok(StateManager { state_file })
+        Ok(Self { state_file })
     }
 
     /// Check if any commit with  the given ID is currently mounted
-    pub fn get_commit_mounted(
-        &self,
-        commit_id: &str,
-    ) -> Result<bool, String> {
+    pub fn get_commit_mounted(&self, commit_id: &str) -> Result<bool, String> {
         let state = self.load_state()?;
         Ok(state.mounts.values().any(|m| m.base_commit == commit_id))
     }
@@ -75,10 +72,10 @@ impl StateManager {
         }
 
         let content = std::fs::read(&self.state_file)
-            .map_err(|e| format!("Failed to read state file: {}", e))?;
+            .map_err(|e| format!("Failed to read state file: {e}"))?;
 
         let state: StratumState = bincode::decode_from_slice(&content, bincode::config::standard())
-            .map_err(|e| format!("Failed to parse state file: {}", e))?
+            .map_err(|e| format!("Failed to parse state file: {e}"))?
             .0;
 
         Ok(state)
@@ -87,10 +84,10 @@ impl StateManager {
     /// Save the current state to disk
     pub fn save_state(&self, state: &StratumState) -> Result<(), String> {
         let content = bincode::encode_to_vec(state, bincode::config::standard())
-            .map_err(|e| format!("Failed to serialize state: {}", e))?;
+            .map_err(|e| format!("Failed to serialize state: {e}"))?;
 
         std::fs::write(&self.state_file, content)
-            .map_err(|e| format!("Failed to write state file: {}", e))?;
+            .map_err(|e| format!("Failed to write state file: {e}"))?;
 
         Ok(())
     }
@@ -123,7 +120,7 @@ impl StateManager {
     ) -> Result<Option<PathBuf>, String> {
         let state = self.load_state()?;
 
-        for (mount_point, mounted_stratum) in state.mounts.iter() {
+        for (mount_point, mounted_stratum) in &state.mounts {
             if let StratumMountRef::Worktree {
                 label: mount_label,
                 worktree: mount_worktree,

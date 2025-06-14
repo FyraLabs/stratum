@@ -60,7 +60,7 @@ impl Store {
         let object_database =
             ObjectDatabase::new(&base_path).expect("Failed to initialize object database");
         let state_manager = StateManager::new().expect("Failed to initialize state manager");
-        Store {
+        Self {
             base_path,
             object_database,
             state_manager,
@@ -184,7 +184,7 @@ impl Store {
     ) -> Result<(), String> {
         let cid = sref
             .resolve_commit_id(self)
-            .map_err(|e| format!("Failed to resolve commit ID: {}", e))?;
+            .map_err(|e| format!("Failed to resolve commit ID: {e}"))?;
 
         let actual_mountpoint = PathBuf::from(mountpoint);
 
@@ -192,11 +192,11 @@ impl Store {
         let already_mountpoint = match mountpoints::mountpaths() {
             Ok(mountpaths) => {
                 let canonical_mountpoint = Path::new(mountpoint).canonicalize().map_err(|e| {
-                    format!("Failed to canonicalize mountpoint {}: {}", mountpoint, e)
+                    format!("Failed to canonicalize mountpoint {mountpoint}: {e}")
                 })?;
                 mountpaths.iter().any(|p| p == &canonical_mountpoint)
             }
-            Err(e) => return Err(format!("Failed to get current mountpoints: {}", e)),
+            Err(e) => return Err(format!("Failed to get current mountpoints: {e}")),
         };
 
         // If it's already a mount point, unmount it first
@@ -213,19 +213,18 @@ impl Store {
                 if let Err(e) = crate::mount::composefs::unmount_composefs_at(Path::new(mountpoint))
                 {
                     return Err(format!(
-                        "Failed to force unmount existing mount at {}: {}",
-                        mountpoint, e
+                        "Failed to force unmount existing mount at {mountpoint}: {e}"
                     ));
                 }
             }
         }
 
         // After unmounting (if needed), we can use the actual mountpoint directly
-        let mounted_mp = actual_mountpoint.clone();
+        let mounted_mp = actual_mountpoint;
 
         // Create mountpoint if it doesn't exist
         std::fs::create_dir_all(mountpoint)
-            .map_err(|e| format!("Failed to create mountpoint {}: {}", mountpoint, e))?;
+            .map_err(|e| format!("Failed to create mountpoint {mountpoint}: {e}"))?;
 
         // Canonicalize the mount path for consistent storage
         let canonical_mountpoint = std::fs::canonicalize(&mounted_mp).map_err(|e| {
@@ -245,12 +244,12 @@ impl Store {
         // Get the composefs file for this commit
         let commit_file = format!("{}/commit.cfs", self.commit_path(&cid));
         if !Path::new(&commit_file).exists() {
-            return Err(format!("Commit file not found: {}", commit_file));
+            return Err(format!("Commit file not found: {commit_file}"));
         }
 
         // Open the composefs image file
         let image_file = std::fs::File::open(&commit_file)
-            .map_err(|e| format!("Failed to open composefs image {}: {}", commit_file, e))?;
+            .map_err(|e| format!("Failed to open composefs image {commit_file}: {e}"))?;
 
         // Extract label for source name construction and worktree operations
         let label = match sref {
@@ -258,109 +257,105 @@ impl Store {
             _ => &sref.to_string(),
         };
 
-        match worktree {
-            Some(worktree_name) => {
-                // Writable mount with worktree upperdir
-                tracing::debug!(
-                    "Mounting ref {:?} (commit: {}) at {} with worktree: {}",
-                    sref,
-                    cid,
-                    mounted_mp.display(),
-                    worktree_name
-                );
+        if let Some(worktree_name) = worktree {
+            // Writable mount with worktree upperdir
+            tracing::debug!(
+                "Mounting ref {:?} (commit: {}) at {} with worktree: {}",
+                sref,
+                cid,
+                mounted_mp.display(),
+                worktree_name
+            );
 
-                // Ensure the worktree exists
-                if !self.worktree_exists(label, worktree_name) {
-                    return Err(format!(
-                        "Worktree {}:{} does not exist",
-                        label, worktree_name
-                    ));
-                }
-
-                let source_name = format!("stratum:{}+{}", label, worktree_name);
-
-                // Create composefs configuration with worktree upperdir
-                let upperdir = self.worktree_upperdir(label, worktree_name);
-                let workdir = self.worktree_workdir(label, worktree_name);
-                let config = crate::mount::composefs::ComposeFsConfig::writable(
-                    image_file.into(),
-                    source_name.clone(),
-                    std::path::PathBuf::from(upperdir),
-                    Some(std::path::PathBuf::from(workdir)),
-                );
-
-                let config = config
-                    .with_basedir(std::path::PathBuf::from(self.objects_path()))
-                    .with_source_name(source_name);
-
-                // Mount using native implementation
-                tracing::debug!("Mounting writable composefs at {}", mounted_mp.display());
-                crate::mount::composefs::mount_composefs_persistent_at(&config, &mounted_mp)
-                    .map_err(|e| format!("Failed to mount composefs: {}", e))?;
-
-                // Update state manager with mount information using canonical path
-                let mounted_stratum = crate::state::MountedStratum {
-                    stratum_ref: crate::state::StratumMountRef::Worktree {
-                        label: sref.to_string(),
-                        worktree: worktree_name.to_string(),
-                    },
-                    mount_point: canonical_mountpoint.clone(),
-                    read_only: false, // Worktrees are always writable
-                    // Base commit of the worktree, useful for safety checks
-                    base_commit: cid.clone(),
-                };
-                self.state_manager
-                    .add_mount(canonical_mountpoint.clone(), mounted_stratum)?;
-
-                tracing::info!(
-                    "Successfully mounted {} at {:?} using native implementation (worktree: {})",
-                    cid,
-                    mounted_mp,
-                    worktree_name
-                );
+            // Ensure the worktree exists
+            if !self.worktree_exists(label, worktree_name) {
+                return Err(format!(
+                    "Worktree {label}:{worktree_name} does not exist"
+                ));
             }
-            None => {
-                // Read-only mount without worktree
-                tracing::debug!(
-                    "Mounting ref {:?} (commit: {}) at {:?} as read-only",
-                    sref,
-                    cid,
-                    mounted_mp
-                );
 
-                let source_name = format!("stratum:{}", sref);
+            let source_name = format!("stratum:{label}+{worktree_name}");
 
-                // Create read-only composefs configuration
-                let config = crate::mount::composefs::ComposeFsConfig::read_only(
-                    image_file.into(),
-                    source_name.clone(),
-                );
+            // Create composefs configuration with worktree upperdir
+            let upperdir = self.worktree_upperdir(label, worktree_name);
+            let workdir = self.worktree_workdir(label, worktree_name);
+            let config = crate::mount::composefs::ComposeFsConfig::writable(
+                image_file.into(),
+                source_name.clone(),
+                std::path::PathBuf::from(upperdir),
+                Some(std::path::PathBuf::from(workdir)),
+            );
 
-                let config = config
-                    .with_basedir(std::path::PathBuf::from(self.objects_path()))
-                    .with_source_name(source_name);
+            let config = config
+                .with_basedir(std::path::PathBuf::from(self.objects_path()))
+                .with_source_name(source_name);
 
-                // Mount using native implementation
-                tracing::debug!("Mounting read-only composefs at {:?}", mounted_mp);
-                crate::mount::composefs::mount_composefs_persistent_at(&config, &mounted_mp)
-                    .map_err(|e| format!("Failed to mount composefs: {}", e))?;
+            // Mount using native implementation
+            tracing::debug!("Mounting writable composefs at {}", mounted_mp.display());
+            crate::mount::composefs::mount_composefs_persistent_at(&config, &mounted_mp)
+                .map_err(|e| format!("Failed to mount composefs: {e}"))?;
 
-                // Update state manager with mount information using canonical path
-                let mounted_stratum = crate::state::MountedStratum {
-                    stratum_ref: crate::state::StratumMountRef::Snapshot(sref.clone()),
-                    mount_point: canonical_mountpoint.clone(),
-                    base_commit: cid.clone(),
-                    read_only: true, // Read-only snapshots
-                };
-                self.state_manager
-                    .add_mount(canonical_mountpoint, mounted_stratum)?;
+            // Update state manager with mount information using canonical path
+            let mounted_stratum = crate::state::MountedStratum {
+                stratum_ref: crate::state::StratumMountRef::Worktree {
+                    label: sref.to_string(),
+                    worktree: worktree_name.to_owned(),
+                },
+                mount_point: canonical_mountpoint.clone(),
+                read_only: false, // Worktrees are always writable
+                // Base commit of the worktree, useful for safety checks
+                base_commit: cid.clone(),
+            };
+            self.state_manager
+                .add_mount(canonical_mountpoint, mounted_stratum)?;
 
-                tracing::info!(
-                    "Successfully mounted {} at {:?} using native implementation (read-only)",
-                    cid,
-                    mounted_mp
-                );
-            }
+            tracing::info!(
+                "Successfully mounted {} at {:?} using native implementation (worktree: {})",
+                cid,
+                mounted_mp,
+                worktree_name
+            );
+        } else {
+            // Read-only mount without worktree
+            tracing::debug!(
+                "Mounting ref {:?} (commit: {}) at {:?} as read-only",
+                sref,
+                cid,
+                mounted_mp
+            );
+
+            let source_name = format!("stratum:{sref}");
+
+            // Create read-only composefs configuration
+            let config = crate::mount::composefs::ComposeFsConfig::read_only(
+                image_file.into(),
+                source_name.clone(),
+            );
+
+            let config = config
+                .with_basedir(std::path::PathBuf::from(self.objects_path()))
+                .with_source_name(source_name);
+
+            // Mount using native implementation
+            tracing::debug!("Mounting read-only composefs at {:?}", mounted_mp);
+            crate::mount::composefs::mount_composefs_persistent_at(&config, &mounted_mp)
+                .map_err(|e| format!("Failed to mount composefs: {e}"))?;
+
+            // Update state manager with mount information using canonical path
+            let mounted_stratum = crate::state::MountedStratum {
+                stratum_ref: crate::state::StratumMountRef::Snapshot(sref.clone()),
+                mount_point: canonical_mountpoint.clone(),
+                base_commit: cid.clone(),
+                read_only: true, // Read-only snapshots
+            };
+            self.state_manager
+                .add_mount(canonical_mountpoint, mounted_stratum)?;
+
+            tracing::info!(
+                "Successfully mounted {} at {:?} using native implementation (read-only)",
+                cid,
+                mounted_mp
+            );
         }
 
         Ok(())
@@ -382,27 +377,27 @@ impl Store {
     ) -> Result<crate::mount::FsHandle, String> {
         // Deny worktree mounts for ephemeral mounts
         if let StratumRef::Worktree { .. } = sref {
-            return Err("Ephemeral mounts do not support worktrees".to_string());
+            return Err("Ephemeral mounts do not support worktrees".to_owned());
         }
 
         // Create mountpoint if it doesn't exist
         std::fs::create_dir_all(mountpoint)
-            .map_err(|e| format!("Failed to create mountpoint {}: {}", mountpoint, e))?;
+            .map_err(|e| format!("Failed to create mountpoint {mountpoint}: {e}"))?;
 
         // Get the commit ID for the stratum reference
         let cid = sref
             .resolve_commit_id(self)
-            .map_err(|e| format!("Failed to resolve commit ID: {}", e))?;
+            .map_err(|e| format!("Failed to resolve commit ID: {e}"))?;
 
         // Get the composefs file for this commit
         let commit_file = format!("{}/commit.cfs", self.commit_path(&cid));
         if !Path::new(&commit_file).exists() {
-            return Err(format!("Commit file not found: {}", commit_file));
+            return Err(format!("Commit file not found: {commit_file}"));
         }
 
         // Open the composefs image file
         let image_file = std::fs::File::open(&commit_file)
-            .map_err(|e| format!("Failed to open composefs image {}: {}", commit_file, e))?;
+            .map_err(|e| format!("Failed to open composefs image {commit_file}: {e}"))?;
 
         // Create composefs configuration for ephemeral mount
         let config = crate::mount::composefs::ComposeFsConfig::read_only(
@@ -418,7 +413,7 @@ impl Store {
         // Mount using native implementation
         tracing::debug!("Mounting read-only composefs at {}", mountpoint);
         let handle = crate::mount::composefs::mount_composefs_at(&config, Path::new(mountpoint))
-            .map_err(|e| format!("Failed to mount composefs: {}", e))?;
+            .map_err(|e| format!("Failed to mount composefs: {e}"))?;
 
         Ok(handle)
     }
@@ -426,10 +421,10 @@ impl Store {
     /// Check if a path is already mounted
     fn is_mounted(&self, path: &str) -> Result<bool, String> {
         let mounts = std::fs::read_to_string("/proc/mounts")
-            .map_err(|e| format!("Failed to read /proc/mounts: {}", e))?;
+            .map_err(|e| format!("Failed to read /proc/mounts: {e}"))?;
 
         let canonical_path = std::fs::canonicalize(path)
-            .map_err(|e| format!("Failed to canonicalize path {}: {}", path, e))?;
+            .map_err(|e| format!("Failed to canonicalize path {path}: {e}"))?;
 
         for line in mounts.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -474,7 +469,7 @@ impl Store {
     pub fn unmount_ref(&self, mountpoint: &str) -> Result<(), String> {
         // Canonicalize the mount path for consistent storage and comparison
         let canonical_mountpoint = std::fs::canonicalize(mountpoint)
-            .map_err(|e| format!("Failed to canonicalize mountpoint {}: {}", mountpoint, e))?;
+            .map_err(|e| format!("Failed to canonicalize mountpoint {mountpoint}: {e}"))?;
 
         if !self.is_mounted(&canonical_mountpoint.to_string_lossy())? {
             tracing::info!("Not mounted at {}", canonical_mountpoint.display());
@@ -497,7 +492,7 @@ impl Store {
 
         // Use native Rust composefs unmounting implementation
         crate::mount::composefs::unmount_composefs_at(&canonical_mountpoint)
-            .map_err(|e| format!("Failed to unmount composefs: {}", e))?;
+            .map_err(|e| format!("Failed to unmount composefs: {e}"))?;
 
         // Remove mount from state manager
         self.state_manager.remove_mount(&canonical_mountpoint)?;
@@ -530,8 +525,7 @@ impl Store {
         // todo: safety check if commit is still mounted
         if self.state_manager.get_commit_mounted(commit_id)? {
             return Err(format!(
-                "Cannot delete commit {}: it is currently mounted",
-                commit_id
+                "Cannot delete commit {commit_id}: it is currently mounted"
             ));
         }
 
@@ -550,7 +544,7 @@ impl Store {
         let commit_path = self.commit_path(commit_id);
         if Path::new(&commit_path).exists() {
             std::fs::remove_dir_all(&commit_path)
-                .map_err(|e| format!("Failed to delete commit directory {}: {}", commit_path, e))?;
+                .map_err(|e| format!("Failed to delete commit directory {commit_path}: {e}"))?;
         } else {
             tracing::warn!("Commit directory {} does not exist", commit_path);
         }
@@ -566,7 +560,7 @@ impl Store {
         tracing::debug!("Registering object {} for commit {}", object_id, commit_id);
         let object_file_meta =
             std::fs::metadata(Path::new(&self.objects_path()).join(object_id))
-                .map_err(|e| format!("Failed to get metadata for object {}: {}", object_id, e))?;
+                .map_err(|e| format!("Failed to get metadata for object {object_id}: {e}"))?;
         self.object_database
             .register_object(object_id, object_file_meta.len(), Some(commit_id));
         Ok(())
@@ -582,7 +576,7 @@ impl Store {
         );
         self.object_database
             .unregister_object(object_id, commit_id)
-            .map_err(|e| format!("Failed to unregister object {}: {}", object_id, e))?;
+            .map_err(|e| format!("Failed to unregister object {object_id}: {e}"))?;
         Ok(())
     }
 
@@ -593,7 +587,7 @@ impl Store {
 
         let commit_file = format!("{}/commit.cfs", self.commit_path(commit_id));
         if !Path::new(&commit_file).exists() {
-            return Err(format!("Commit file not found: {}", commit_file));
+            return Err(format!("Commit file not found: {commit_file}"));
         }
 
         // Get the list of objects in the commit file
@@ -634,12 +628,12 @@ impl Store {
         let file_chunks = chunks::collect_file_chunks(dir_path)?;
 
         // Generate merkle root for cryptographic verification
-        let file_refs: Vec<&[u8]> = file_chunks.iter().map(|v| v.as_slice()).collect();
+        let file_refs: Vec<&[u8]> = file_chunks.iter().map(std::vec::Vec::as_slice).collect();
         let merkle_root = crate::util::build_merkle_root(&file_refs);
 
         // Generate fast metadata hash (this becomes the commit ID)
         let metadata_hash = crate::util::hash_directory_tree(Path::new(dir_path))
-            .map_err(|e| format!("Failed to hash directory: {}", e))?;
+            .map_err(|e| format!("Failed to hash directory: {e}"))?;
         let commit_id = hex::encode(metadata_hash);
 
         // todo: if commit has a parent (that means it's not a base commit)
@@ -677,7 +671,7 @@ impl Store {
                 merkle_root: hex::encode(merkle_root),
                 metadata_hash: commit_id.clone(),
                 timestamp: chrono::Utc::now(),
-                parent_commit: parent_commit.map(|s| s.to_string()),
+                parent_commit: parent_commit.map(std::borrow::ToOwned::to_owned),
             },
             files: crate::commit::FileStats {
                 count: file_chunks.len() as u64,
@@ -731,7 +725,7 @@ impl Store {
     pub fn tag_commit(&self, label: &str, commit_id: &str, tag: &str) -> Result<(), String> {
         // Verify commit exists
         if !self.commit_exists(commit_id) {
-            return Err(format!("Commit {} does not exist", commit_id));
+            return Err(format!("Commit {commit_id} does not exist"));
         }
 
         // Create tags directory
@@ -739,13 +733,13 @@ impl Store {
         std::fs::create_dir_all(&tags_path).map_err(|e| e.to_string())?;
 
         // Create symlink pointing to commit directory
-        let tag_symlink = format!("{}/{}", tags_path, tag);
+        let tag_symlink = format!("{tags_path}/{tag}");
 
         // Create relative path from tags directory to commits directory
         // tags path is: base_path/refs/label/tags
         // commits path is: base_path/commits/commit_id
         // so relative path is: ../../../commits/commit_id
-        let relative_commit_path = format!("../../../commits/{}", commit_id);
+        let relative_commit_path = format!("../../../commits/{commit_id}");
 
         // Remove existing tag if it exists (handles both valid and broken symlinks)
         let _ = std::fs::remove_file(&tag_symlink);
@@ -762,12 +756,12 @@ impl Store {
         let tag_symlink = format!("{}/{}", Self::TAGS_DIR, tag);
 
         if !Path::new(&tag_symlink).exists() {
-            return Err(format!("Tag {}:{} does not exist", label, tag));
+            return Err(format!("Tag {label}:{tag} does not exist"));
         }
 
         // Remove the symlink
         std::fs::remove_file(&tag_symlink)
-            .map_err(|e| format!("Failed to remove tag symlink: {}", e))?;
+            .map_err(|e| format!("Failed to remove tag symlink: {e}"))?;
 
         tracing::info!("Untagged {}:{}", label, tag);
         Ok(())
@@ -778,12 +772,12 @@ impl Store {
         let tag_symlink = format!("{}/{}", self.tags_path(label), tag);
 
         if !Path::new(&tag_symlink).exists() {
-            return Err(format!("Tag {}:{} does not exist", label, tag));
+            return Err(format!("Tag {label}:{tag} does not exist"));
         }
 
         // Read the symlink target (commit directory path)
         let target_path = std::fs::read_link(&tag_symlink)
-            .map_err(|e| format!("Failed to read tag symlink: {}", e))?;
+            .map_err(|e| format!("Failed to read tag symlink: {e}"))?;
 
         // Extract commit ID from the path
         let commit_id = target_path
@@ -832,15 +826,14 @@ impl Store {
     ) -> Result<(), String> {
         // Verify the base commit exists
         if !self.commit_exists(base_commit) {
-            return Err(format!("Base commit {} does not exist", base_commit));
+            return Err(format!("Base commit {base_commit} does not exist"));
         }
 
         // Check if worktree already exists
         let meta_path = self.worktree_meta_path(label, worktree_name);
         if Path::new(&meta_path).exists() {
             return Err(format!(
-                "Worktree {}:{} already exists",
-                label, worktree_name
+                "Worktree {label}:{worktree_name} already exists"
             ));
         }
 
@@ -849,10 +842,10 @@ impl Store {
         let workdir = self.worktree_workdir(label, worktree_name);
 
         std::fs::create_dir_all(&upperdir)
-            .map_err(|e| format!("Failed to create upperdir {}: {}", upperdir, e))?;
+            .map_err(|e| format!("Failed to create upperdir {upperdir}: {e}"))?;
 
         std::fs::create_dir_all(&workdir)
-            .map_err(|e| format!("Failed to create workdir {}: {}", workdir, e))?;
+            .map_err(|e| format!("Failed to create workdir {workdir}: {e}"))?;
 
         // Sync the worktree directories to ensure they're written to disk
         if let Err(e) = fsync_all_walk(Path::new(&upperdir)) {
@@ -861,8 +854,8 @@ impl Store {
 
         // Create worktree metadata
         let worktree = crate::commit::Worktree::new(
-            worktree_name.to_string(),
-            base_commit.to_string(),
+            worktree_name.to_owned(),
+            base_commit.to_owned(),
             description,
         );
 
@@ -951,16 +944,15 @@ impl Store {
 
         if !Path::new(&meta_path).exists() {
             return Err(format!(
-                "Worktree {}:{} does not exist",
-                label, worktree_name
+                "Worktree {label}:{worktree_name} does not exist"
             ));
         }
 
         let toml_content = std::fs::read_to_string(&meta_path)
-            .map_err(|e| format!("Failed to read worktree metadata: {}", e))?;
+            .map_err(|e| format!("Failed to read worktree metadata: {e}"))?;
 
         let worktree: crate::commit::Worktree = toml::from_str(&toml_content)
-            .map_err(|e| format!("Failed to parse worktree metadata: {}", e))?;
+            .map_err(|e| format!("Failed to parse worktree metadata: {e}"))?;
 
         Ok(worktree)
     }
@@ -1001,16 +993,14 @@ impl Store {
         // Check if worktree exists
         if !self.worktree_exists(label, worktree_name) {
             return Err(format!(
-                "Worktree {}:{} does not exist",
-                label, worktree_name
+                "Worktree {label}:{worktree_name} does not exist"
             ));
         }
 
         // Check if worktree is currently mounted using state manager
         if self.is_worktree_mounted(label, worktree_name)? {
             return Err(format!(
-                "Worktree {}:{} is currently mounted. Unmount it first.",
-                label, worktree_name
+                "Worktree {label}:{worktree_name} is currently mounted. Unmount it first."
             ));
         }
 
@@ -1018,8 +1008,7 @@ impl Store {
         let worktree_path = self.worktree_path(label, worktree_name);
         std::fs::remove_dir_all(&worktree_path).map_err(|e| {
             format!(
-                "Failed to remove worktree directory {}: {}",
-                worktree_path, e
+                "Failed to remove worktree directory {worktree_path}: {e}"
             )
         })?;
 
@@ -1073,7 +1062,7 @@ impl Store {
         // Use the state manager to find which worktree is mounted at this path
         let state = self.state_manager.load_state()?;
 
-        for (mount_point, mounted_stratum) in state.mounts.iter() {
+        for (mount_point, mounted_stratum) in &state.mounts {
             if mount_point.to_string_lossy() == mount_path {
                 if let crate::state::StratumMountRef::Worktree {
                     label: mount_label,
@@ -1111,9 +1100,9 @@ impl Store {
                 let loaded_worktree = self.load_worktree(label, worktree)?;
 
                 if current_worktree == loaded_worktree {
-                    return Err("cannot rebase a worktree onto itself".to_string());
+                    return Err("cannot rebase a worktree onto itself".to_owned());
                 }
-                loaded_worktree.base_commit().to_string()
+                loaded_worktree.base_commit().to_owned()
             }
         };
 
@@ -1138,7 +1127,7 @@ impl Store {
 
         // Verify the new base commit exists
         if !self.commit_exists(&new_base) {
-            return Err(format!("New base commit {} does not exist", new_base));
+            return Err(format!("New base commit {new_base} does not exist"));
         }
 
         // Update the worktree's base commit
@@ -1163,8 +1152,8 @@ impl Store {
 
             // Create a StratumRef for the worktree
             let sref = StratumRef::Worktree {
-                label: label.to_string(),
-                worktree: worktree_name.to_string(),
+                label: label.to_owned(),
+                worktree: worktree_name.to_owned(),
             };
 
             // Remount the worktree at the same path
@@ -1378,7 +1367,7 @@ impl Store {
 
     /// Create an optimized union patch commit using hash derivation
     ///
-    /// This optimized version of union_patch_commit derives the new commit hash
+    /// This optimized version of `union_patch_commit` derives the new commit hash
     /// from the existing base commit instead of recalculating everything from scratch.
     /// This significantly improves performance for patchset operations.
     ///
@@ -1399,7 +1388,7 @@ impl Store {
     ) -> Result<String, String> {
         // Verify the base commit exists
         if !self.commit_exists(base_commit) {
-            return Err(format!("Base commit {} does not exist", base_commit));
+            return Err(format!("Base commit {base_commit} does not exist"));
         }
 
         tracing::info!(
@@ -1415,7 +1404,7 @@ impl Store {
         let parent_dir = dir_path_buf.parent().unwrap_or(Path::new("/tmp"));
 
         let ovl_mountpoint = tempfile::tempdir()
-            .map_err(|e| format!("Failed to create temporary overlayfs mount: {}", e))?;
+            .map_err(|e| format!("Failed to create temporary overlayfs mount: {e}"))?;
 
         // First try creating temporary directory adjacent to the source directory
         let (_ovl_tmp, temp_upperdir, overlayfs_workdir, overlayfs_mountpoint) =
@@ -1431,9 +1420,9 @@ impl Store {
                     let work_dir = tmp_dir.path().join("workdir");
 
                     std::fs::create_dir_all(&mount_point)
-                        .map_err(|e| format!("Failed to create overlayfs mountpoint: {}", e))?;
+                        .map_err(|e| format!("Failed to create overlayfs mountpoint: {e}"))?;
                     std::fs::create_dir_all(&work_dir)
-                        .map_err(|e| format!("Failed to create overlayfs workdir: {}", e))?;
+                        .map_err(|e| format!("Failed to create overlayfs workdir: {e}"))?;
 
                     // Sync the parent directories to ensure they're written to disk
                     if let Some(parent) = mount_point.parent() {
@@ -1468,7 +1457,7 @@ impl Store {
                     );
 
                     let tmp_dir = tempfile::tempdir().map_err(|e| {
-                        format!("Failed to create temporary overlayfs mount: {}", e)
+                        format!("Failed to create temporary overlayfs mount: {e}")
                     })?;
 
                     let mount_point = tmp_dir.path().join("overlayfs_mount");
@@ -1476,11 +1465,11 @@ impl Store {
                     let work_dir = tmp_dir.path().join("workdir");
 
                     std::fs::create_dir_all(&mount_point)
-                        .map_err(|e| format!("Failed to create overlayfs mountpoint: {}", e))?;
+                        .map_err(|e| format!("Failed to create overlayfs mountpoint: {e}"))?;
                     std::fs::create_dir_all(&upper_dir)
-                        .map_err(|e| format!("Failed to create temporary upperdir: {}", e))?;
+                        .map_err(|e| format!("Failed to create temporary upperdir: {e}"))?;
                     std::fs::create_dir_all(&work_dir)
-                        .map_err(|e| format!("Failed to create overlayfs workdir: {}", e))?;
+                        .map_err(|e| format!("Failed to create overlayfs workdir: {e}"))?;
 
                     // Sync the parent directories to ensure they're written to disk
                     if let Some(parent) = mount_point.parent() {
@@ -1518,7 +1507,7 @@ impl Store {
                         upper_dir.display()
                     );
                     copy_dir_all(dir_path, &upper_dir)
-                        .map_err(|e| format!("Failed to copy to temporary upperdir: {}", e))?;
+                        .map_err(|e| format!("Failed to copy to temporary upperdir: {e}"))?;
 
                     // Sync the copied directory to ensure it's written to disk
                     if let Err(e) = fsync_all_walk(&upper_dir) {
@@ -1534,7 +1523,7 @@ impl Store {
             };
 
         let commit_id = {
-            let base_sref = StratumRef::Commit(base_commit.to_string());
+            let base_sref = StratumRef::Commit(base_commit.to_owned());
 
             let basecommit_mountpoint = tempfile::tempdir().map_err(|e| {
                 format!("Failed to create temporary mountpoint for base commit: {e}")
@@ -1564,7 +1553,7 @@ impl Store {
 
             ovl_mount
                 .mount()
-                .map_err(|e| format!("Failed to mount overlayfs: {}", e))?;
+                .map_err(|e| format!("Failed to mount overlayfs: {e}"))?;
 
             // OPTIMIZATION: Derive merkle root and file chunks from existing data
             // instead of reading all files from the combined mount
@@ -1613,7 +1602,7 @@ impl Store {
     /// * `patch_dir` - Path to the patch directory containing changed files
     ///
     /// # Returns
-    /// Returns a tuple of (derived_merkle_root, combined_file_chunks)
+    /// Returns a tuple of (`derived_merkle_root`, `combined_file_chunks`)
     fn derive_combined_merkle_data(
         &self,
         base_commit: &str,
@@ -1623,12 +1612,12 @@ impl Store {
         let base_commit_obj = self.load_commit(base_commit)?;
         let base_merkle_root = base_commit_obj
             .merkle_root_bytes()
-            .map_err(|e| format!("Failed to decode base commit merkle root: {}", e))?;
+            .map_err(|e| format!("Failed to decode base commit merkle root: {e}"))?;
 
         // Hash the actual patch files to get real content hashes
         let mut patch_chunks = Vec::new();
         crate::store::chunks::collect_chunks_recursive(Path::new(patch_dir), &mut patch_chunks)
-            .map_err(|e| format!("Failed to collect patch file chunks: {}", e))?;
+            .map_err(|e| format!("Failed to collect patch file chunks: {e}"))?;
 
         tracing::debug!("Collected {} real patch file chunks", patch_chunks.len());
 
@@ -1710,27 +1699,25 @@ impl Store {
         use sha2::{Digest, Sha256};
 
         // Load the base commit to get its metadata hash
-        let base_commit_hash = if let Ok(base_commit_obj) = self.load_commit(base_commit) {
-            base_commit_obj.metadata_hash_bytes().unwrap_or([0u8; 32])
-        } else {
-            // Fallback: decode the commit ID directly
-            hex::decode(base_commit)
-                .ok()
-                .and_then(|bytes| {
-                    if bytes.len() == 32 {
-                        let mut array = [0u8; 32];
-                        array.copy_from_slice(&bytes);
-                        Some(array)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or([0u8; 32])
-        };
+        let base_commit_hash = self.load_commit(base_commit).map_or_else(
+            |_| {
+                hex::decode(base_commit)
+                    .ok()
+                    .and_then(|bytes| {
+                        (bytes.len() == 32).then(|| {
+                            let mut array = [0u8; 32];
+                            array.copy_from_slice(&bytes);
+                            array
+                        })
+                    })
+                    .unwrap_or([0u8; 32])
+            },
+            |base_commit_obj| base_commit_obj.metadata_hash_bytes().unwrap_or([0u8; 32]),
+        );
 
         // Generate a hash of the patch directory for deterministic commit derivation
         let patch_metadata_hash = crate::util::hash_directory_tree(Path::new(patch_dir))
-            .map_err(|e| format!("Failed to hash patch directory: {}", e))?;
+            .map_err(|e| format!("Failed to hash patch directory: {e}"))?;
 
         // Create a deterministic hash by combining:
         // 1. Base commit hash
@@ -1805,7 +1792,7 @@ impl Store {
                 merkle_root: hex::encode(merkle_root),
                 metadata_hash: commit_id.clone(),
                 timestamp: chrono::Utc::now(),
-                parent_commit: parent_commit.map(|s| s.to_string()),
+                parent_commit: parent_commit.map(std::borrow::ToOwned::to_owned),
             },
             files: crate::commit::FileStats {
                 count: file_chunks.len() as u64,
@@ -1875,10 +1862,10 @@ impl Store {
         tracing::info!("Creating ComposeFS file for commit {}", commit_id);
         fsync_all_walk(
             &Path::new(dir_path).canonicalize().map_err(|e| {
-                format!("Failed to canonicalize directory path {}: {}", dir_path, e)
+                format!("Failed to canonicalize directory path {dir_path}: {e}")
             })?,
         )
-        .map_err(|e| format!("Failed to fsync directory {}: {}", dir_path, e))?;
+        .map_err(|e| format!("Failed to fsync directory {dir_path}: {e}"))?;
         let commit_file = format!("{}/{}", self.commit_path(commit_id), Self::COMMIT_FILE);
 
         let output = std::process::Command::new("mkcomposefs")
@@ -1902,7 +1889,7 @@ impl Store {
         // .map_err(|e| format!("Failed to fsync composefs file {}: {}", commit_file, e))?;
 
         fsync_all_walk(Path::new(&self.objects_path()))
-            .map_err(|e| format!("Failed to fsync composefs file {}: {}", commit_file, e))?;
+            .map_err(|e| format!("Failed to fsync composefs file {commit_file}: {e}"))?;
 
         tracing::debug!("Created composefs file: {}", commit_file);
         Ok(commit_file)
@@ -1931,11 +1918,7 @@ impl Store {
             .lines()
             .filter_map(|line| {
                 let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    Some(trimmed.to_string())
-                } else {
-                    None
-                }
+                (!trimmed.is_empty()).then(|| trimmed.to_owned())
             })
             .collect();
         tracing::debug!("Found {} objects in commit: {}", objects.len(), file);
@@ -1966,11 +1949,7 @@ impl Store {
             .lines()
             .filter_map(|line| {
                 let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    Some(trimmed.to_string())
-                } else {
-                    None
-                }
+                (!trimmed.is_empty()).then(|| trimmed.to_owned())
             })
             .collect();
         tracing::debug!(
@@ -1986,7 +1965,7 @@ impl Store {
         // Verify objects in a commit using composefs-info
         let commit_file = format!("{}/{}", self.commit_path(commit_id), Self::COMMIT_FILE);
         if !Path::new(&commit_file).exists() {
-            return Err(format!("Commit file not found: {}", commit_file));
+            return Err(format!("Commit file not found: {commit_file}"));
         }
 
         let missing_objects = self.composefs_info_missing_objects(&commit_file)?;
@@ -2009,10 +1988,10 @@ impl Store {
     pub fn load_commit(&self, commit_id: &str) -> Result<crate::commit::Commit, String> {
         let metadata_path = format!("{}/metadata.toml", self.commit_path(commit_id));
         let toml_content = std::fs::read_to_string(&metadata_path)
-            .map_err(|e| format!("Failed to read commit metadata: {}", e))?;
+            .map_err(|e| format!("Failed to read commit metadata: {e}"))?;
 
         let commit: crate::commit::Commit = toml::from_str(&toml_content)
-            .map_err(|e| format!("Failed to parse commit metadata: {}", e))?;
+            .map_err(|e| format!("Failed to parse commit metadata: {e}"))?;
 
         Ok(commit)
     }

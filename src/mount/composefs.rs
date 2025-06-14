@@ -1,4 +1,4 @@
-//! ComposeFS mounting support with upperdir capability
+//! `ComposeFS` mounting support with upperdir capability
 //!
 //! This module provides enhanced composefs mounting capabilities that support
 //! writable upperdirs on top of the read-only composefs base layers.
@@ -46,7 +46,7 @@ use super::FsHandle;
 
 // Private module for pre-6.15 temporary mount compatibility
 mod tmp_mount_compat {
-    use super::*; // Imports Result, AsFd, BorrowedFd, OwnedFd, Path, CWD, open, RustixFsMode, RustixFsOFlags, move_mount, unmount, MoveMountFlags, UnmountFlags
+    use super::{AsFd, AsRawFd, BorrowedFd, CWD, MoveMountFlags, OwnedFd, Result, RustixFsMode, RustixFsOFlags, UnmountFlags, move_mount, open, unmount}; // Imports Result, AsFd, BorrowedFd, OwnedFd, Path, CWD, open, RustixFsMode, RustixFsOFlags, move_mount, unmount, MoveMountFlags, UnmountFlags
     use tempfile::TempDir;
 
     #[derive(Debug)]
@@ -99,7 +99,7 @@ mod tmp_mount_compat {
                 opened_fd.as_raw_fd(),
                 tmp.path()
             );
-            Ok(TmpMount {
+            Ok(Self {
                 dir: tmp,
                 fd: opened_fd,
             })
@@ -132,7 +132,7 @@ mod tmp_mount_compat {
 }
 
 /// Formats a string like "/proc/self/fd/3" for the given fd.
-pub(crate) fn proc_self_fd(fd: impl AsFd) -> String {
+pub fn proc_self_fd(fd: impl AsFd) -> String {
     format!("/proc/self/fd/{}", fd.as_fd().as_raw_fd())
 }
 
@@ -318,13 +318,13 @@ pub struct ComposeFsConfig {
     pub verity_required: bool,
     /// Whether to enable metacopy
     pub metacopy: bool,
-    /// Whether to enable redirect_dir
+    /// Whether to enable `redirect_dir`
     pub redirect_dir: bool,
 }
 
 impl ComposeFsConfig {
     /// Create a new read-only composefs configuration
-    pub fn read_only(image_fd: OwnedFd, name: String) -> Self {
+    pub const fn read_only(image_fd: OwnedFd, name: String) -> Self {
         Self {
             image_fd,
             name,
@@ -339,7 +339,7 @@ impl ComposeFsConfig {
     }
 
     /// Create a new writable composefs configuration with upperdir
-    pub fn writable(
+    pub const fn writable(
         image_fd: OwnedFd,
         name: String,
         upperdir: PathBuf,
@@ -371,19 +371,19 @@ impl ComposeFsConfig {
     }
 
     /// Set verity requirement
-    pub fn with_verity(mut self, required: bool) -> Self {
+    pub const fn with_verity(mut self, required: bool) -> Self {
         self.verity_required = required;
         self
     }
 
     /// Set metacopy option
-    pub fn with_metacopy(mut self, enabled: bool) -> Self {
+    pub const fn with_metacopy(mut self, enabled: bool) -> Self {
         self.metacopy = enabled;
         self
     }
 
-    /// Set redirect_dir option
-    pub fn with_redirect_dir(mut self, enabled: bool) -> Self {
+    /// Set `redirect_dir` option
+    pub const fn with_redirect_dir(mut self, enabled: bool) -> Self {
         self.redirect_dir = enabled;
         self
     }
@@ -406,7 +406,7 @@ pub fn erofs_fsmount(
     Ok(mnt_fd)
 }
 
-/// Mounts a composefs (EROFS base + OverlayFS) filesystem.
+/// Mounts a composefs (EROFS base + `OverlayFS`) filesystem.
 pub fn composefs_fsmount(
     config: &ComposeFsConfig,
     target_path: Option<&Path>,
@@ -443,8 +443,7 @@ pub fn composefs_fsmount(
     // Set the mount source name to something meaningful instead of "none"
     let mount_name = config
         .source_name
-        .as_ref()
-        .cloned()
+        .clone()
         .unwrap_or_else(|| format!("composefs-{}", config.name));
     fsconfig_set_string(overlayfs.as_fd(), "source", &mount_name)?;
     tracing::debug!("Set overlay mount source name to: {}", mount_name);
@@ -675,7 +674,7 @@ pub struct ComposeFsMount {
 
 impl ComposeFsMount {
     /// Create a new composefs mount
-    pub fn new(config: ComposeFsConfig, mountpoint: PathBuf) -> Self {
+    pub const fn new(config: ComposeFsConfig, mountpoint: PathBuf) -> Self {
         Self {
             mountpoint,
             config,
@@ -732,7 +731,7 @@ impl ComposeFsMount {
     }
 
     /// Check if this mount is writable (has upperdir)
-    pub fn is_writable(&self) -> bool {
+    pub const fn is_writable(&self) -> bool {
         self.config.upperdir.is_some()
     }
 }
@@ -761,7 +760,7 @@ mod tests {
         let temp_file = tempfile::NamedTempFile::new().unwrap();
         let image_fd = std::fs::File::open(temp_file.path()).unwrap().into();
 
-        let config = ComposeFsConfig::read_only(image_fd, "test".to_string());
+        let config = ComposeFsConfig::read_only(image_fd, "test".to_owned());
         assert!(config.upperdir.is_none());
         assert!(config.verity_required);
     }
@@ -774,7 +773,7 @@ mod tests {
 
         let config = ComposeFsConfig::writable(
             image_fd,
-            "test".to_string(),
+            "test".to_owned(),
             temp_dir.path().to_path_buf(),
             None,
         );

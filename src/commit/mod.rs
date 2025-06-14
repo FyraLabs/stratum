@@ -52,7 +52,7 @@ pub struct WorktreeInfo {
 /// Main commit structure that maps directly to TOML sections
 ///
 /// This follows an OCI-style approach where:
-/// - Commits are identified by their metadata_hash (content-addressable)
+/// - Commits are identified by their `metadata_hash` (content-addressable)
 /// - Tags serve as human-readable aliases pointing to commit hashes
 /// - No commit messages - tags provide the semantic meaning
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -224,22 +224,22 @@ mod tests {
 
         // serialize to TOML
         let toml_str = toml::to_string(&commit).expect("Failed to serialize commit");
-        println!("Serialized commit:\n{}", toml_str);
+        println!("Serialized commit:\n{toml_str}");
     }
 
     #[test]
     fn test_worktree_creation() {
         let worktree = Worktree::new(
-            "main".to_string(),
-            "abc123".to_string(),
-            Some("Main development branch".to_string()),
+            "main".to_owned(),
+            "abc123".to_owned(),
+            Some("Main development branch".to_owned()),
         );
 
         assert_eq!(worktree.name(), "main");
         assert_eq!(worktree.base_commit(), "abc123");
         assert_eq!(
             worktree.worktree.description,
-            Some("Main development branch".to_string())
+            Some("Main development branch".to_owned())
         );
     }
 
@@ -248,7 +248,7 @@ mod tests {
         use std::fs;
         use tempfile::TempDir;
 
-        let worktree = Worktree::new("test".to_string(), "xyz789".to_string(), None);
+        let worktree = Worktree::new("test".to_owned(), "xyz789".to_owned(), None);
 
         let temp_dir = TempDir::new().unwrap();
         let upperdir = temp_dir.path().join("upperdir");

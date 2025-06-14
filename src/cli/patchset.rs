@@ -1,6 +1,6 @@
-use crate::{commit::StratumRef, patchset::Patchset, store::Store};
+use crate::{patchset::Patchset, store::Store};
 use clap::Parser;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 pub enum PatchsetCommand {
@@ -20,11 +20,11 @@ impl PatchsetCommand {
     /// Execute the patchset command
     pub fn execute(self, store: &Store) -> Result<(), String> {
         match self {
-            PatchsetCommand::Build { patchset_file, tag } => {
+            Self::Build { patchset_file, tag } => {
                 let patchset = Patchset::load_patchset_from_file(&patchset_file)?;
                 let artifact = patchset
                     .generate_commit(store, &tag)
-                    .map_err(|e| format!("Failed to generate commit from patchset: {}", e))?;
+                    .map_err(|e| format!("Failed to generate commit from patchset: {e}"))?;
                 tracing::info!(
                     "Patchset '{}' built successfully with tag '{}'",
                     patchset_file.display(),

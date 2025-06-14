@@ -65,7 +65,7 @@ pub enum Commands {
     /// Mount a stratum at a given path
     #[clap(name = "mount", aliases = &["mnt", "m"])]
     Mount {
-        /// The stratum reference to mount (supports format: stratum_ref:tag or stratum_ref+worktree)
+        /// The stratum reference to mount (supports format: `stratum_ref:tag` or `stratum_ref+worktree`)
         #[clap(value_parser)]
         stratum_ref: StratumRef,
 
@@ -98,7 +98,7 @@ const BASE_PATH: &str = "/var/lib/stratum";
 
 impl Cli {
     pub fn run(self) -> Result<(), String> {
-        let store = crate::store::Store::new(BASE_PATH.to_string());
+        let store = crate::store::Store::new(BASE_PATH.to_owned());
         tracing::trace!("Running command: {:?}", self.command);
         match self.command {
             Commands::Import {
@@ -128,7 +128,7 @@ impl Cli {
                 );
 
                 let (stratum_label, tag) = util::parse_label(&name)
-                    .map_err(|e| format!("Failed to parse label '{}': {}", name, e))?;
+                    .map_err(|e| format!("Failed to parse label '{name}': {e}"))?;
 
                 // Import the directory and get the commit ID
                 let parent_commit = if let Some(patch_ref) = patch {
@@ -151,10 +151,10 @@ impl Cli {
                 let commit_id = parent_commit;
 
                 // Always tag the commit - use provided tag or default to "latest"
-                let tag_name = tag.unwrap_or_else(|| "latest".to_string());
+                let tag_name = tag.unwrap_or_else(|| "latest".to_owned());
                 store
                     .tag_commit(&stratum_label, &commit_id, &tag_name)
-                    .map_err(|e| format!("Failed to tag commit '{}': {}", commit_id, e))?;
+                    .map_err(|e| format!("Failed to tag commit '{commit_id}': {e}"))?;
 
                 tracing::info!(
                     "Tagged commit {} as {}:{}",
@@ -163,37 +163,37 @@ impl Cli {
                     tag_name
                 );
 
-                println!("{}  (tagged as {}:{})", commit_id, stratum_label, tag_name);
+                println!("{commit_id}  (tagged as {stratum_label}:{tag_name})");
                 Ok(())
             }
             Commands::Tag { source, new_tag } => {
                 let commit_id = source.resolve_commit_id(&store).map_err(|e| {
-                    format!("Failed to resolve source commit ID '{:?}': {}", source, e)
+                    format!("Failed to resolve source commit ID '{source:?}': {e}")
                 })?;
 
                 let (target_label, target_tag) = util::parse_label(&new_tag)
-                    .map_err(|e| format!("Failed to parse target label '{}': {}", new_tag, e))?;
-                let target_tag = target_tag.unwrap_or("latest".to_string());
+                    .map_err(|e| format!("Failed to parse target label '{new_tag}': {e}"))?;
+                let target_tag = target_tag.unwrap_or("latest".to_owned());
 
                 tracing::info!("Tagging commit {} with tag '{}'", commit_id, new_tag);
                 store
                     .tag_commit(&target_label, &commit_id, &target_tag)
-                    .map_err(|e| format!("Failed to tag commit '{}': {}", commit_id, e))?;
-                println!("Tagged commit {} with '{}'", commit_id, new_tag);
+                    .map_err(|e| format!("Failed to tag commit '{commit_id}': {e}"))?;
+                println!("Tagged commit {commit_id} with '{new_tag}'");
                 Ok(())
             }
             Commands::Untag { tag } => {
                 let (label, tag_name) = util::parse_label(&tag)
-                    .map_err(|e| format!("Failed to parse tag '{}': {}", tag, e))?;
+                    .map_err(|e| format!("Failed to parse tag '{tag}': {e}"))?;
                 let tag_name = tag_name.ok_or_else(|| {
-                    "No tag provided, please provide in form of volume:tag".to_string()
+                    "No tag provided, please provide in form of volume:tag".to_owned()
                 })?;
 
                 tracing::info!("Removing tag '{}'", tag);
                 store
                     .untag(&tag_name, &label)
-                    .map_err(|e| format!("Failed to remove tag '{}': {}", tag, e))?;
-                println!("Removed tag '{}'", tag);
+                    .map_err(|e| format!("Failed to remove tag '{tag}': {e}"))?;
+                println!("Removed tag '{tag}'");
                 Ok(())
             }
             Commands::Mount {
@@ -210,11 +210,10 @@ impl Cli {
                         format!("/run/user/{}/stratum/{}", uid.as_raw(), stratum_ref);
                     std::fs::create_dir_all(&auto_mountpoint).map_err(|e| {
                         format!(
-                            "Failed to create auto mountpoint {}: {}",
-                            auto_mountpoint, e
+                            "Failed to create auto mountpoint {auto_mountpoint}: {e}"
                         )
                     })?;
-                    println!("{}", auto_mountpoint); // Print auto-generated mountpoint to stdout
+                    println!("{auto_mountpoint}"); // Print auto-generated mountpoint to stdout
                     auto_mountpoint
                 };
 
@@ -254,24 +253,24 @@ impl Cli {
                 // Delegate to the worktree command handler
                 command
                     .execute(&store)
-                    .map_err(|e| format!("Worktree command failed: {}", e))
+                    .map_err(|e| format!("Worktree command failed: {e}"))
             }
             Commands::Patchset(command) => {
                 // Delegate to the patchset command handler
                 command
                     .execute(&store)
-                    .map_err(|e| format!("Patchset command failed: {}", e))
+                    .map_err(|e| format!("Patchset command failed: {e}"))
             }
             Commands::Remove { stratum_ref } => {
                 // todo: safety check: duplicate commits?
                 tracing::info!("Removing stratum reference: {:?}", stratum_ref);
                 let commit_id = stratum_ref.resolve_commit_id(&store).map_err(|e| {
-                    format!("Failed to resolve commit ID for '{:?}': {}", stratum_ref, e)
+                    format!("Failed to resolve commit ID for '{stratum_ref:?}': {e}")
                 })?;
                 store
                     .delete_commit(&commit_id)
-                    .map_err(|e| format!("Failed to remove stratum '{}': {}", stratum_ref, e))?;
-                println!("Removed stratum reference: {}", stratum_ref);
+                    .map_err(|e| format!("Failed to remove stratum '{stratum_ref}': {e}"))?;
+                println!("Removed stratum reference: {stratum_ref}");
                 Ok(())
             }
         }

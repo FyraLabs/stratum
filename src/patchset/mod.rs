@@ -23,7 +23,7 @@ pub struct Patchset {
 
 impl Patchset {
     /// Creates a new patchset with the given base commit and patches.
-    pub fn new(base_commit: Option<String>, patches: Vec<String>) -> Self {
+    pub const fn new(base_commit: Option<String>, patches: Vec<String>) -> Self {
         Self {
             patchset: PatchsetData {
                 base_commit,
@@ -51,8 +51,8 @@ impl Patchset {
 
     pub fn load_patchset_from_file(path: &Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read patchset file: {}", e))?;
-        toml::from_str(&content).map_err(|e| format!("Failed to parse patchset: {}", e))
+            .map_err(|e| format!("Failed to read patchset file: {e}"))?;
+        toml::from_str(&content).map_err(|e| format!("Failed to parse patchset: {e}"))
     }
 
     /// Apply a single patch on top of a base commit
@@ -70,7 +70,7 @@ impl Patchset {
         let patch_mount = tempfile::Builder::new()
             .prefix("stratum_staging_")
             .tempdir_in(store.base_path())
-            .map_err(|e| format!("Failed to create staging directory: {}", e))?;
+            .map_err(|e| format!("Failed to create staging directory: {e}"))?;
 
         let copy_workdir = store.new_tempdir();
         tracing::debug!(
@@ -91,8 +91,8 @@ impl Patchset {
                 store.mount_ref_ephemeral(patch, &patch_mount.path().to_string_lossy())?;
 
             copy_dir_all(patch_mount.path(), copy_workdir.path())
-                .map_err(|e| format!("Failed to copy directory: {}", e))?;
-        }
+                .map_err(|e| format!("Failed to copy directory: {e}"))?;
+        };
 
         let base_commit_id = base_commit.resolve_commit_id(store)?;
         tracing::debug!(
@@ -120,14 +120,14 @@ impl Patchset {
         });
 
         let (label, tag) = crate::util::parse_label(label)
-            .map_err(|e| format!("Failed to parse label '{}': {}", label, e))?;
+            .map_err(|e| format!("Failed to parse label '{label}': {e}"))?;
         // Actually check if the stratum with the label exists
         if !Path::new(store.base_path())
             .join("refs")
             .join(&label)
             .exists()
         {
-            return Err(format!("Stratum with label '{}' does not exist", label));
+            return Err(format!("Stratum with label '{label}' does not exist"));
         }
 
         tracing::debug!(
@@ -138,7 +138,7 @@ impl Patchset {
         let mut transient_commits_to_clean = Vec::new();
 
         let mut current_commit: Option<StratumRef> = None;
-        let mut patches_to_apply = self.patches().to_vec();
+        let mut patches_to_apply = self.patches();
         let last_patch = patches_to_apply.last().cloned();
 
         // If no base commit and using first patch as base, remove it from patches to apply
@@ -162,7 +162,7 @@ impl Patchset {
                 StratumRef::Commit(
                     base_commit
                         .as_ref()
-                        .ok_or_else(|| "No base commit or patches to apply".to_string())?
+                        .ok_or_else(|| "No base commit or patches to apply".to_owned())?
                         .resolve_commit_id(store)?,
                 )
             };
@@ -185,8 +185,7 @@ impl Patchset {
             )
             .map_err(|e| {
                 format!(
-                    "Failed to remove transient ref '{}': {}",
-                    transient_label, e
+                    "Failed to remove transient ref '{transient_label}': {e}"
                 )
             })?;
             transient_commits_to_clean.push(new_commit_id); // Store commit ID, not label
@@ -201,7 +200,7 @@ impl Patchset {
                 StratumRef::Commit(
                     base_commit
                         .as_ref()
-                        .ok_or_else(|| "No base commit or patches to apply".to_string())?
+                        .ok_or_else(|| "No base commit or patches to apply".to_owned())?
                         .resolve_commit_id(store)?,
                 )
             };
@@ -223,7 +222,7 @@ impl Patchset {
                     final_commit.as_ref().unwrap(),
                     &tag.unwrap_or_else(|| {
                         tracing::warn!("No tag specified, using 'latest' as default");
-                        "latest".to_string()
+                        "latest".to_owned()
                     }),
                 )
                 .map_err(|e| {
@@ -240,8 +239,7 @@ impl Patchset {
             tracing::debug!("Cleaning up transient commit ID: {}", transient_commit);
             store.delete_commit(&transient_commit).map_err(|e| {
                 format!(
-                    "Failed to remove transient commit '{}': {}",
-                    transient_commit, e
+                    "Failed to remove transient commit '{transient_commit}': {e}"
                 )
             })?;
         }
@@ -249,7 +247,7 @@ impl Patchset {
         // Return the final commit as a StratumRef
         final_commit
             .map(StratumRef::Commit)
-            .ok_or_else(|| "No final commit generated".to_string())
+            .ok_or_else(|| "No final commit generated".to_owned())
     }
 }
 

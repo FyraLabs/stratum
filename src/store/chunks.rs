@@ -19,7 +19,7 @@ pub fn collect_chunks_recursive(dir: &Path, chunks: &mut Vec<Vec<u8>>) -> Result
         .map_err(|e| e.to_string())?;
 
     // Sort for consistent ordering
-    entries.sort_by_key(|entry| entry.file_name());
+    entries.sort_by_key(std::fs::DirEntry::file_name);
 
     for entry in entries {
         let path = entry.path();
@@ -166,7 +166,7 @@ pub fn collect_file_chunks(dir_path: &str) -> Result<Vec<Vec<u8>>, String> {
     // Use symlink_metadata to avoid following symlinks when checking if it's a directory
     let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if !metadata.is_dir() {
-        return Err("Path is not a directory".to_string());
+        return Err("Path is not a directory".to_owned());
     }
 
     collect_chunks_recursive(path, &mut chunks)?;

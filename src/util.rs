@@ -1,4 +1,3 @@
-use clap::ValueEnum;
 use rs_merkle::{Hasher, MerkleTree};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -9,9 +8,9 @@ use std::path::Path;
 pub fn parse_label(label: &str) -> Result<(String, Option<String>), String> {
     label
         .split_once(':')
-        .map(|(name, tag)| (name.to_string(), Some(tag.to_string())))
-        .or_else(|| Some((label.to_string(), None)))
-        .ok_or_else(|| format!("Invalid label format: {}", label))
+        .map(|(name, tag)| (name.to_owned(), Some(tag.to_owned())))
+        .or_else(|| Some((label.to_owned(), None)))
+        .ok_or_else(|| format!("Invalid label format: {label}"))
 }
 
 /// Derives a new hash by combining two byte arrays using SHA256.
@@ -103,7 +102,7 @@ pub fn calculate_dir_hash(dir_path: &Path, root_path: &Path) -> io::Result<[u8; 
     let mut entries = fs::read_dir(dir_path)?.collect::<Result<Vec<_>, io::Error>>()?;
 
     // Sort entries by file name to ensure consistent hash results
-    entries.sort_by_key(|entry| entry.file_name());
+    entries.sort_by_key(std::fs::DirEntry::file_name);
 
     for entry in entries {
         let path = entry.path();
@@ -462,7 +461,7 @@ fn copy_symlink(src: &Path, dst: &Path) -> io::Result<()> {
     let link_target = fs::read_link(src)?;
 
     // Remove destination if it exists
-    let _ = fs::remove_file(dst);
+    _ = fs::remove_file(dst);
 
     // Create the symlink
     std::os::unix::fs::symlink(&link_target, dst)?;
@@ -545,7 +544,7 @@ fn copy_xattrs(src: &Path, dst: &Path) -> io::Result<()> {
         let mut attr_list = vec![0u8; list_size as usize];
         let actual_size = libc::listxattr(
             src_cstr.as_ptr(),
-            attr_list.as_mut_ptr() as *mut i8,
+            attr_list.as_mut_ptr().cast::<i8>(),
             list_size as usize,
         );
         if actual_size < 0 {
@@ -599,7 +598,7 @@ fn copy_xattrs(src: &Path, dst: &Path) -> io::Result<()> {
                         let actual_value_size = libc::getxattr(
                             src_cstr.as_ptr(),
                             attr_name.as_ptr(),
-                            value.as_mut_ptr() as *mut libc::c_void,
+                            value.as_mut_ptr().cast::<libc::c_void>(),
                             value_size as usize,
                         );
 
@@ -607,7 +606,7 @@ fn copy_xattrs(src: &Path, dst: &Path) -> io::Result<()> {
                             let result = libc::setxattr(
                                 dst_cstr.as_ptr(),
                                 attr_name.as_ptr(),
-                                value.as_ptr() as *const libc::c_void,
+                                value.as_ptr().cast::<libc::c_void>(),
                                 actual_value_size as usize,
                                 0,
                             );
@@ -631,12 +630,12 @@ fn copy_xattrs(src: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Convert SystemTime to libc::timespec
+/// Convert `SystemTime` to `libc::timespec`
 pub fn timespec_from_systemtime(time: std::time::SystemTime) -> libc::timespec {
     match time.duration_since(std::time::UNIX_EPOCH) {
         Ok(duration) => libc::timespec {
             tv_sec: duration.as_secs() as libc::time_t,
-            tv_nsec: duration.subsec_nanos() as libc::c_long,
+            tv_nsec: libc::c_long::from(duration.subsec_nanos()),
         },
         Err(_) => libc::timespec {
             tv_sec: 0,
@@ -651,7 +650,7 @@ pub fn calculate_total_size(dir_path: &str) -> Result<u64, String> {
     // Use symlink_metadata to avoid following symlinks when checking if it's a directory
     let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if !metadata.is_dir() {
-        return Err("Path is not a directory".to_string());
+        return Err("Path is not a directory".to_owned());
     }
 
     let mut total_size = 0u64;

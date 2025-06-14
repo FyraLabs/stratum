@@ -19,7 +19,7 @@ impl std::str::FromStr for StratumRef {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(StratumRef::from(s))
+        Ok(Self::from(s))
     }
 }
 
@@ -28,16 +28,16 @@ impl From<&str> for StratumRef {
         if s.contains('+') {
             let parts: Vec<&str> = s.splitn(2, '+').collect();
             if parts.len() != 2 {
-                return StratumRef::Tag(s.to_string());
+                return Self::Tag(s.to_owned());
             }
-            StratumRef::Worktree {
-                label: parts[0].to_string(),
-                worktree: parts[1].to_string(),
+            Self::Worktree {
+                label: parts[0].to_owned(),
+                worktree: parts[1].to_owned(),
             }
         } else if is_sha256_hash(s) {
-            StratumRef::Commit(s.to_string())
+            Self::Commit(s.to_owned())
         } else {
-            StratumRef::Tag(s.to_string())
+            Self::Tag(s.to_owned())
         }
     }
 }
@@ -45,9 +45,9 @@ impl From<&str> for StratumRef {
 impl fmt::Display for StratumRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StratumRef::Commit(id) => write!(f, "{}", id),
-            StratumRef::Tag(tag) => write!(f, "{}", tag),
-            StratumRef::Worktree { label, worktree } => write!(f, "{}+{}", label, worktree),
+            Self::Commit(id) => write!(f, "{id}"),
+            Self::Tag(tag) => write!(f, "{tag}"),
+            Self::Worktree { label, worktree } => write!(f, "{label}+{worktree}"),
         }
     }
 }
@@ -55,21 +55,21 @@ impl fmt::Display for StratumRef {
 impl StratumRef {
     pub fn resolve_commit_id(&self, store: &crate::store::Store) -> Result<String, String> {
         match self {
-            StratumRef::Commit(id) => Ok(id.clone()),
-            StratumRef::Tag(tag) => {
+            Self::Commit(id) => Ok(id.clone()),
+            Self::Tag(tag) => {
                 let (label, tag) = parse_label(tag)
-                    .map_err(|e| format!("Failed to parse tag '{}': {}", tag, e))?;
-                let tag = tag.unwrap_or_else(|| "latest".to_string());
+                    .map_err(|e| format!("Failed to parse tag '{tag}': {e}"))?;
+                let tag = tag.unwrap_or_else(|| "latest".to_owned());
 
                 store
                     .resolve_tag(&label, &tag)
-                    .map_err(|e| format!("Failed to resolve tag '{}: {}': {}", label, tag, e))
+                    .map_err(|e| format!("Failed to resolve tag '{label}: {tag}': {e}"))
             }
-            StratumRef::Worktree { label, worktree } => {
+            Self::Worktree { label, worktree } => {
                 let worktree_obj = store.load_worktree(label, worktree).map_err(|e| {
-                    format!("Failed to load worktree '{}+{}': {}", label, worktree, e)
+                    format!("Failed to load worktree '{label}+{worktree}': {e}")
                 })?;
-                Ok(worktree_obj.base_commit().to_string())
+                Ok(worktree_obj.base_commit().to_owned())
             }
         }
     }

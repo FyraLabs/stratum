@@ -47,7 +47,7 @@ impl WorktreeCommand {
     /// Execute the worktree command
     pub fn execute(self, store: &Store) -> Result<(), String> {
         match self {
-            WorktreeCommand::Add {
+            Self::Add {
                 name,
                 base_commit,
                 description,
@@ -56,7 +56,7 @@ impl WorktreeCommand {
                     StratumRef::Worktree { label, worktree } => (label, worktree),
                     _ => {
                         return Err(
-                            "Invalid worktree name format. Use 'label+worktree_name'.".to_string()
+                            "Invalid worktree name format. Use 'label+worktree_name'.".to_owned()
                         );
                     }
                 };
@@ -64,7 +64,7 @@ impl WorktreeCommand {
                 store.create_worktree(&label, &worktree_name, &commit_id, description)?;
                 Ok(())
             }
-            WorktreeCommand::List { stratum_name } => {
+            Self::List { stratum_name } => {
                 if let Some(ref name) = stratum_name {
                     let worktrees = store.list_worktrees(name)?;
                     for (worktree_ref, worktree) in worktrees {
@@ -94,18 +94,18 @@ impl WorktreeCommand {
                 }
                 Ok(())
             }
-            WorktreeCommand::Remove { name } => {
+            Self::Remove { name } => {
                 let (label, worktree_name) = match name {
                     StratumRef::Worktree { label, worktree } => (label, worktree),
                     _ => {
                         return Err(
-                            "Invalid worktree name format. Use 'label+worktree_name'.".to_string()
+                            "Invalid worktree name format. Use 'label+worktree_name'.".to_owned()
                         );
                     }
                 };
                 store.remove_worktree(&label, &worktree_name)
             }
-            WorktreeCommand::Rebase {
+            Self::Rebase {
                 worktree,
                 new_commit,
             } => {
@@ -113,7 +113,7 @@ impl WorktreeCommand {
                     StratumRef::Worktree { label, worktree } => (label, worktree),
                     _ => {
                         return Err(
-                            "Invalid worktree name format. Use 'label+worktree_name'.".to_string()
+                            "Invalid worktree name format. Use 'label+worktree_name'.".to_owned()
                         );
                     }
                 };

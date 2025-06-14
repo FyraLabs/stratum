@@ -23,14 +23,14 @@ pub enum FsHandle {
 
 impl FsHandle {
     // Renamed from open_raw_fs to new_from_fs_name for clarity
-    pub fn new_from_fs_name(name: &str) -> Result<FsHandle> {
-        Ok(FsHandle::Fd(fsopen(name, FsOpenFlags::FSOPEN_CLOEXEC)?))
+    pub fn new_from_fs_name(name: &str) -> Result<Self> {
+        Ok(Self::Fd(fsopen(name, FsOpenFlags::FSOPEN_CLOEXEC)?))
     }
 
     pub fn path(&self) -> Option<&Path> {
         match self {
-            FsHandle::Path(p) => Some(p.as_path()),
-            FsHandle::Fd(_) => None,
+            Self::Path(p) => Some(p.as_path()),
+            Self::Fd(_) => None,
         }
     }
 
@@ -41,16 +41,15 @@ impl FsHandle {
 impl AsFd for FsHandle {
     fn as_fd(&self) -> BorrowedFd {
         match self {
-            FsHandle::Fd(fd) => fd.as_fd(),
+            Self::Fd(fd) => fd.as_fd(),
             // This is tricky. A Path variant doesn't have an FD in the same way.
             // This might panic or be incorrect depending on usage.
             // Consider if AsFd is appropriate for a Path variant or if users
             // should explicitly handle the Fd case.
             // For now, to satisfy existing usages that might expect an FD (like Drop),
             // we'll make it panic if it's a Path. This needs careful review.
-            FsHandle::Path(p) => panic!(
-                "Cannot call as_fd on an FsHandle::Path variant for path: {:?}",
-                p
+            Self::Path(p) => panic!(
+                "Cannot call as_fd on an FsHandle::Path variant for path: {p:?}"
             ),
         }
     }
@@ -59,7 +58,7 @@ impl AsFd for FsHandle {
 impl Drop for FsHandle {
     fn drop(&mut self) {
         match self {
-            FsHandle::Fd(fd) => {
+            Self::Fd(fd) => {
                 // OwnedFd handles closing automatically. The read loop was likely for debugging or specific error handling.
                 // For a generic FsHandle, just ensuring the FD is closed is sufficient.
                 // The AsRawFd trait is available on OwnedFd directly.
@@ -68,7 +67,7 @@ impl Drop for FsHandle {
                     fd.as_raw_fd()
                 );
             }
-            FsHandle::Path(path_buf) => {
+            Self::Path(path_buf) => {
                 tracing::debug!(
                     "FsHandle::Path dropped, attempting to unmount {:?}",
                     path_buf
@@ -125,13 +124,13 @@ pub struct TempOvlMount {
 }
 
 impl TempOvlMount {
-    pub fn new(
+    pub const fn new(
         mountpoint: PathBuf,
         lowerdirs: HashSet<PathBuf>,
         upperdir: PathBuf,
         workdir: Option<PathBuf>,
     ) -> Self {
-        TempOvlMount {
+        Self {
             mountpoint,
             lowerdirs,
             upperdir,
@@ -141,13 +140,10 @@ impl TempOvlMount {
 
     pub fn mount(&self) -> Result<()> {
         // Create the workdir if needed
-        let workdir_str = match &self.workdir {
-            Some(path) => path.display().to_string(),
-            None => {
-                let temp_dir = tempfile::tempdir()?;
-                // We need to keep the temp dir alive, but for now use its path
-                temp_dir.path().display().to_string()
-            }
+        let workdir_str = if let Some(path) = &self.workdir { path.display().to_string() } else {
+            let temp_dir = tempfile::tempdir()?;
+            // We need to keep the temp dir alive, but for now use its path
+            temp_dir.path().display().to_string()
         };
 
         // Build the lowerdir vector
@@ -259,12 +255,12 @@ pub fn mount_composefs_with_upperdir_and_source(
     let mut config = if let Some(upperdir) = upperdir {
         composefs::ComposeFsConfig::writable(
             image_fd,
-            name.to_string(),
+            name.to_owned(),
             upperdir.as_ref().to_path_buf(),
             None, // Auto-generate workdir
         )
     } else {
-        composefs::ComposeFsConfig::read_only(image_fd, name.to_string())
+        composefs::ComposeFsConfig::read_only(image_fd, name.to_owned())
     };
 
     if let Some(basedir) = basedir {
@@ -272,7 +268,7 @@ pub fn mount_composefs_with_upperdir_and_source(
     }
 
     if let Some(source_name) = source_name {
-        config = config.with_source_name(source_name.to_string());
+        config = config.with_source_name(source_name.to_owned());
     }
 
     composefs::mount_composefs_at(&config, mountpoint.as_ref())?;
@@ -293,12 +289,12 @@ pub fn create_composefs_mount(
     let config = if let Some(upperdir) = upperdir {
         composefs::ComposeFsConfig::writable(
             image_fd,
-            name.to_string(),
+            name.to_owned(),
             upperdir.as_ref().to_path_buf(),
             None, // Auto-generate workdir
         )
     } else {
-        composefs::ComposeFsConfig::read_only(image_fd, name.to_string())
+        composefs::ComposeFsConfig::read_only(image_fd, name.to_owned())
     };
 
     let config = if let Some(basedir) = basedir {
@@ -344,12 +340,12 @@ pub fn mount_composefs_persistent_with_source(
     let mut config = if let Some(upperdir) = upperdir {
         composefs::ComposeFsConfig::writable(
             image_fd,
-            name.to_string(),
+            name.to_owned(),
             upperdir.as_ref().to_path_buf(),
             None, // Auto-generate workdir
         )
     } else {
-        composefs::ComposeFsConfig::read_only(image_fd, name.to_string())
+        composefs::ComposeFsConfig::read_only(image_fd, name.to_owned())
     };
 
     if let Some(basedir) = basedir {
@@ -357,7 +353,7 @@ pub fn mount_composefs_persistent_with_source(
     }
 
     if let Some(source_name) = source_name {
-        config = config.with_source_name(source_name.to_string());
+        config = config.with_source_name(source_name.to_owned());
     }
 
     // Ensure mountpoint exists
@@ -379,7 +375,7 @@ pub fn mount_composefs_persistent_with_source(
 }
 
 /// Unmount a persistent composefs mount at the specified path
-/// This can be used to clean up mounts created with mount_composefs_persistent
+/// This can be used to clean up mounts created with `mount_composefs_persistent`
 pub fn unmount_composefs_persistent(mountpoint: impl AsRef<Path>) -> Result<()> {
     use nix::mount::{MntFlags, umount2};
     umount2(mountpoint.as_ref(), MntFlags::empty())?;

@@ -77,8 +77,8 @@ fn test_oci_style_commit_and_tagging() {
     // List tags
     let tags = store.list_tags("myapp").unwrap();
     assert_eq!(tags.len(), 2);
-    assert!(tags.contains(&"v1.0".to_string()));
-    assert!(tags.contains(&"latest".to_string()));
+    assert!(tags.contains(&"v1.0".to_owned()));
+    assert!(tags.contains(&"latest".to_owned()));
 }
 
 #[test]
