@@ -191,9 +191,9 @@ impl Store {
         // Check if the destination is already a mountpoint
         let already_mountpoint = match mountpoints::mountpaths() {
             Ok(mountpaths) => {
-                let canonical_mountpoint = Path::new(mountpoint).canonicalize().map_err(|e| {
-                    format!("Failed to canonicalize mountpoint {mountpoint}: {e}")
-                })?;
+                let canonical_mountpoint = Path::new(mountpoint)
+                    .canonicalize()
+                    .map_err(|e| format!("Failed to canonicalize mountpoint {mountpoint}: {e}"))?;
                 mountpaths.iter().any(|p| p == &canonical_mountpoint)
             }
             Err(e) => return Err(format!("Failed to get current mountpoints: {e}")),
@@ -269,9 +269,7 @@ impl Store {
 
             // Ensure the worktree exists
             if !self.worktree_exists(label, worktree_name) {
-                return Err(format!(
-                    "Worktree {label}:{worktree_name} does not exist"
-                ));
+                return Err(format!("Worktree {label}:{worktree_name} does not exist"));
             }
 
             let source_name = format!("stratum:{label}+{worktree_name}");
@@ -742,7 +740,7 @@ impl Store {
         let relative_commit_path = format!("../../../commits/{commit_id}");
 
         // Remove existing tag if it exists (handles both valid and broken symlinks)
-        let _ = std::fs::remove_file(&tag_symlink);
+        _ = std::fs::remove_file(&tag_symlink);
 
         // Create relative symlink to commit directory
         std::os::unix::fs::symlink(&relative_commit_path, &tag_symlink)
@@ -832,9 +830,7 @@ impl Store {
         // Check if worktree already exists
         let meta_path = self.worktree_meta_path(label, worktree_name);
         if Path::new(&meta_path).exists() {
-            return Err(format!(
-                "Worktree {label}:{worktree_name} already exists"
-            ));
+            return Err(format!("Worktree {label}:{worktree_name} already exists"));
         }
 
         // Create worktree directories
@@ -943,9 +939,7 @@ impl Store {
         let meta_path = self.worktree_meta_path(label, worktree_name);
 
         if !Path::new(&meta_path).exists() {
-            return Err(format!(
-                "Worktree {label}:{worktree_name} does not exist"
-            ));
+            return Err(format!("Worktree {label}:{worktree_name} does not exist"));
         }
 
         let toml_content = std::fs::read_to_string(&meta_path)
@@ -992,9 +986,7 @@ impl Store {
     pub fn remove_worktree(&self, label: &str, worktree_name: &str) -> Result<(), String> {
         // Check if worktree exists
         if !self.worktree_exists(label, worktree_name) {
-            return Err(format!(
-                "Worktree {label}:{worktree_name} does not exist"
-            ));
+            return Err(format!("Worktree {label}:{worktree_name} does not exist"));
         }
 
         // Check if worktree is currently mounted using state manager
@@ -1006,11 +998,8 @@ impl Store {
 
         // Remove the entire worktree directory
         let worktree_path = self.worktree_path(label, worktree_name);
-        std::fs::remove_dir_all(&worktree_path).map_err(|e| {
-            format!(
-                "Failed to remove worktree directory {worktree_path}: {e}"
-            )
-        })?;
+        std::fs::remove_dir_all(&worktree_path)
+            .map_err(|e| format!("Failed to remove worktree directory {worktree_path}: {e}"))?;
 
         tracing::info!("Removed worktree {}:{}", label, worktree_name);
         Ok(())
@@ -1456,9 +1445,8 @@ impl Store {
                         e
                     );
 
-                    let tmp_dir = tempfile::tempdir().map_err(|e| {
-                        format!("Failed to create temporary overlayfs mount: {e}")
-                    })?;
+                    let tmp_dir = tempfile::tempdir()
+                        .map_err(|e| format!("Failed to create temporary overlayfs mount: {e}"))?;
 
                     let mount_point = tmp_dir.path().join("overlayfs_mount");
                     let upper_dir = tmp_dir.path().join("upperdir");
@@ -1861,9 +1849,9 @@ impl Store {
     fn create_composefs_file(&self, commit_id: &str, dir_path: &str) -> Result<String, String> {
         tracing::info!("Creating ComposeFS file for commit {}", commit_id);
         fsync_all_walk(
-            &Path::new(dir_path).canonicalize().map_err(|e| {
-                format!("Failed to canonicalize directory path {dir_path}: {e}")
-            })?,
+            &Path::new(dir_path)
+                .canonicalize()
+                .map_err(|e| format!("Failed to canonicalize directory path {dir_path}: {e}"))?,
         )
         .map_err(|e| format!("Failed to fsync directory {dir_path}: {e}"))?;
         let commit_file = format!("{}/{}", self.commit_path(commit_id), Self::COMMIT_FILE);
