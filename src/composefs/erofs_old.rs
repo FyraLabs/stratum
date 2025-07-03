@@ -60,13 +60,13 @@ impl ErofsImage {
             path,
         )
     }
-    
+
     unsafe fn into_filesystem(self) -> Box<SimpleBufferedFileSystem> {
         unsafe {
             Box::from_raw(Box::into_raw(self.sbi.filesystem).cast::<SimpleBufferedFileSystem>())
         }
     }
-    
+
     /// Write the EROFS image to disk
     pub fn write(&mut self, buf: &mut &[u8]) -> Result<(), ErofsError> {
         todo!()
@@ -132,7 +132,6 @@ pub struct DirEntry {
     /// Extended attributes shared entries
     pub xattr_shared_entries: XAttrSharedEntries,
 }
-
 
 pub struct SimpleInode {
     pub info: InodeInfo,

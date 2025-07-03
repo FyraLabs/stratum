@@ -25,8 +25,8 @@
 // - write them back to disk
 
 use composefs::fsverity::FsVerityHashValue;
-pub mod erofs_old;
 pub mod erofs;
+pub mod erofs_old;
 pub mod fsverity;
 
 // todo: Actually re-implement `mkcomposefs --digest-store` functionality
