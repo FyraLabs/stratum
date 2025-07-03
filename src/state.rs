@@ -60,10 +60,7 @@ impl StateManager {
     }
 
     /// Check if any commit with  the given ID is currently mounted
-    pub fn get_commit_mounted(
-        &self,
-        commit_id: &str,
-    ) -> Result<bool, String> {
+    pub fn get_commit_mounted(&self, commit_id: &str) -> Result<bool, String> {
         let state = self.load_state()?;
         Ok(state.mounts.values().any(|m| m.base_commit == commit_id))
     }

@@ -1,6 +1,7 @@
 use clap::Parser;
 mod cli;
 mod commit;
+mod composefs;
 mod mount;
 mod object;
 mod patchset;

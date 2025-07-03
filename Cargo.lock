@@ -400,6 +400,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "erofs-sys"
+version = "0.1.0"
+source = "git+https://github.com/ToolmanP/erofs-rs?rev=fb5301b3cc46b909de32f86ea246eb9ecff741cf#fb5301b3cc46b909de32f86ea246eb9ecff741cf"
+
+[[package]]
 name = "errno"
 version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1011,6 +1016,7 @@ dependencies = [
  "chrono",
  "clap",
  "composefs",
+ "erofs-sys",
  "file-lock",
  "hex",
  "jwalk",
@@ -1024,6 +1030,7 @@ dependencies = [
  "sha2",
  "sled",
  "tempfile",
+ "thiserror",
  "toml",
  "tracing",
  "tracing-subscriber",
