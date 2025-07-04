@@ -18,130 +18,35 @@ use zerocopy::FromBytes;
 pub struct ErofsImage<'i> {
     i: composefs::erofs::reader::Image<'i>,
 }
-/// Iterator for recursively traversing all files and directories in a directory tree.
-pub struct IterRecursiveFiles<'a> {
-    image: &'a ErofsImage<'a>,
-    stack: Vec<(
-        Rc<composefs::erofs::reader::InodeType<'a>>,
-        Box<dyn Iterator<Item = composefs::erofs::reader::DirectoryEntry<'a>> + 'a>,
-    )>,
+
+struct InlineFilesIter<'a> {
+    inode: composefs::erofs::reader::InodeType<'a>,
+    it: Option<composefs::erofs::reader::DirectoryEntries<'a>>,
 }
 
-impl<'a> IterRecursiveFiles<'a> {
-    pub fn new(image: &'a ErofsImage<'a>, inode: composefs::erofs::reader::InodeType<'a>) -> Self {
-        let inode = Rc::new(inode);
-        let mut stack = Vec::new();
-        if inode.mode().is_dir() {
-            let iter = image
-                .list_files_rc(Rc::clone(&inode))
-                .filter(|entry| entry.name != b"." && entry.name != b"..");
-            stack.push((Rc::clone(&inode), Box::new(iter) as _));
+fn inode_inline<'img>(inode: &composefs::erofs::reader::InodeType<'img>) -> &'img [u8] {
+    match inode {
+        composefs::erofs::reader::InodeType::Compact(inode) => {
+            &inode.data[inode.header.xattr_size()..]
         }
-        IterRecursiveFiles { image, stack }
+        composefs::erofs::reader::InodeType::Extended(inode) => {
+            &inode.data[inode.header.xattr_size()..]
+        }
     }
 }
 
-impl<'a> Iterator for IterRecursiveFiles<'a> {
+impl<'a> Iterator for InlineFilesIter<'a> {
     type Item = composefs::erofs::reader::DirectoryEntry<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((_, iter)) = self.stack.last_mut() {
-            if let Some(entry) = iter.next() {
-                let child_inode = self.image.i.inode(entry.header.inode_offset.get());
-                let child_inode = Rc::new(child_inode);
-                if child_inode.mode().is_dir() {
-                    let sub_iter = self
-                        .image
-                        .list_files_rc(Rc::clone(&child_inode))
-                        .filter(|entry| entry.name != b"." && entry.name != b"..");
-                    self.stack
-                        .push((Rc::clone(&child_inode), Box::new(sub_iter)));
-                }
-                return Some(entry);
-            } else {
-                self.stack.pop();
-            }
+        if self.it.is_none() {
+            self.it = Some(
+                composefs::erofs::reader::DirectoryBlock::ref_from_bytes(inode_inline(&self.inode))
+                    .unwrap()
+                    .entries(),
+            );
         }
-        None
-    }
-}
-
-pub struct IterFiles<'a> {
-    _inode: Rc<composefs::erofs::reader::InodeType<'a>>,
-    state: IterFilesState<'a>,
-}
-
-enum IterFilesState<'a> {
-    Empty,
-    Inline(std::vec::IntoIter<DirectoryEntry<'a>>),
-    ExternalBlocks {
-        mut_blocks: Box<dyn Iterator<Item = &'a composefs::erofs::reader::DirectoryBlock> + 'a>,
-        cur_entries: Option<composefs::erofs::reader::DirectoryEntries<'a>>,
-    },
-}
-
-impl<'a> IterFiles<'a> {
-    pub fn new(
-        image: &'a ErofsImage<'a>,
-        inode: Rc<composefs::erofs::reader::InodeType<'a>>,
-    ) -> Self {
-        use IterFilesState::*;
-        use composefs::erofs::format::DataLayout;
-
-        let _inode = Rc::clone(&inode);
-
-        let state = match (inode.data_layout(), inode.size()) {
-            (DataLayout::ChunkBased, 0) if inode.inline().is_empty() => Empty,
-            (DataLayout::ChunkBased, 0) => {
-                // Extract entries BEFORE constructing the struct
-                let entries: Vec<_> = {
-                    let block =
-                        composefs::erofs::reader::DirectoryBlock::ref_from_bytes(inode.inline())
-                            .unwrap();
-                    block.entries().collect()
-                };
-                Inline(entries.into_iter())
-            }
-            _ => {
-                let blocks = inode
-                    .blocks(image.i.sb.blkszbits)
-                    .map(move |blkid| image.i.directory_block(blkid));
-                ExternalBlocks {
-                    mut_blocks: Box::new(blocks),
-                    cur_entries: None,
-                }
-            }
-        };
-        Self { _inode, state }
-    }
-}
-
-impl<'a> Iterator for IterFiles<'a> {
-    type Item = composefs::erofs::reader::DirectoryEntry<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        use IterFilesState::*;
-        match &mut self.state {
-            Empty => None,
-            Inline(iter) => iter.next(),
-            ExternalBlocks {
-                mut_blocks,
-                cur_entries,
-            } => loop {
-                if let Some(entries) = cur_entries {
-                    if let Some(entry) = entries.next() {
-                        return Some(entry);
-                    }
-                }
-                // Advance to next block
-                match mut_blocks.next() {
-                    Some(block) => {
-                        *cur_entries = Some(block.entries());
-                    }
-                    None => return None,
-                }
-            },
-        }
+        self.it.as_mut().and_then(|it| it.next())
     }
 }
 
@@ -159,17 +64,51 @@ impl<'i> ErofsImage<'i> {
     pub fn list_recursive_files<'a>(
         &'a self,
         inode: composefs::erofs::reader::InodeType<'a>,
-        // yield_dir: bool,
-    ) -> IterRecursiveFiles<'a> {
-        IterRecursiveFiles::new(self, inode)
+        yield_dir: bool,
+        f: &mut impl FnMut(DirectoryEntry<'a>),
+    ) {
+        assert!(inode.mode().is_dir());
+        self.list_files_with_owned_inode(inode)
+            .filter(|entry| entry.name != b"." && entry.name != b"..")
+            .for_each(move |entry| {
+                let child_inode = self.i.inode(entry.header.inode_offset.get());
+                if child_inode.mode().is_dir() {
+                    // For directories, yield the entry and then recurse
+                    if yield_dir {
+                        f(entry);
+                    }
+                    self.list_recursive_files(child_inode, yield_dir, f);
+                } else {
+                    // For files, just yield the entry
+                    f(entry);
+                }
+            })
     }
 
-    pub fn list_files_rc<'a>(
+    pub fn list_files_with_owned_inode<'a>(
         &'a self,
-        inode: Rc<composefs::erofs::reader::InodeType<'a>>,
-    ) -> IterFiles<'a> {
+        inode: composefs::erofs::reader::InodeType<'a>,
+    ) -> impl Iterator<Item = composefs::erofs::reader::DirectoryEntry<'a>> + use<'a> {
         assert!(inode.mode().is_dir());
-        IterFiles::new(self, inode)
+        match (inode.data_layout(), inode.size()) {
+            (composefs::erofs::format::DataLayout::ChunkBased, 0) if inode.inline().is_empty() => {
+                Box::new(std::iter::empty())
+                    as Box<dyn Iterator<Item = composefs::erofs::reader::DirectoryEntry<'a>>>
+            }
+            (composefs::erofs::format::DataLayout::ChunkBased, 0) => {
+                Box::new(InlineFilesIter { it: None, inode })
+            }
+            _ => {
+                // Directory uses external blocks
+
+                Box::new(
+                    inode
+                        .blocks(self.i.sb.blkszbits)
+                        .map(|blkid| self.i.directory_block(blkid))
+                        .flat_map(|dirblk| dirblk.entries()),
+                )
+            }
+        }
     }
 
     pub fn list_files<'a>(
