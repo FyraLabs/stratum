@@ -4,27 +4,17 @@
 //!
 //! important for ComposeFS itself, since it uses EROFS to store the directory tree
 //! and we want to be able to read and write them
-use composefs::erofs::reader::InodeHeader;
-use composefs::erofs::reader::InodeOps;
-use composefs::{erofs::reader::DirectoryEntry, fsverity::FsVerityHashValue};
-use libc::_SC_CHILD_MAX;
-use libc::B0;
+use composefs::erofs::reader::{DirectoryEntry, InodeHeader, InodeOps, InodeType};
 use rustix::path::Arg;
-use std::io::Read;
-use std::rc::Rc;
 use tracing::trace;
 use zerocopy::FromBytes;
 
 pub struct ErofsImage<'i> {
-    i: composefs::erofs::reader::Image<'i>,
+    pub i: composefs::erofs::reader::Image<'i>,
 }
 
-struct InlineFilesIter<'a> {
-    inode: composefs::erofs::reader::InodeType<'a>,
-    it: Option<composefs::erofs::reader::DirectoryEntries<'a>>,
-}
-
-fn inode_inline<'img>(inode: &composefs::erofs::reader::InodeType<'img>) -> &'img [u8] {
+/// Get the inline data of an inode.
+pub fn inode_inline<'img>(inode: &composefs::erofs::reader::InodeType<'img>) -> &'img [u8] {
     match inode {
         composefs::erofs::reader::InodeType::Compact(inode) => {
             &inode.data[inode.header.xattr_size()..]
@@ -32,21 +22,6 @@ fn inode_inline<'img>(inode: &composefs::erofs::reader::InodeType<'img>) -> &'im
         composefs::erofs::reader::InodeType::Extended(inode) => {
             &inode.data[inode.header.xattr_size()..]
         }
-    }
-}
-
-impl<'a> Iterator for InlineFilesIter<'a> {
-    type Item = composefs::erofs::reader::DirectoryEntry<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.it.is_none() {
-            self.it = Some(
-                composefs::erofs::reader::DirectoryBlock::ref_from_bytes(inode_inline(&self.inode))
-                    .unwrap()
-                    .entries(),
-            );
-        }
-        self.it.as_mut().and_then(|it| it.next())
     }
 }
 
@@ -63,44 +38,48 @@ impl<'i> ErofsImage<'i> {
 
     pub fn list_recursive_files<'a>(
         &'a self,
-        inode: composefs::erofs::reader::InodeType<'a>,
+        inode: InodeType<'a>,
         yield_dir: bool,
-        f: &mut impl FnMut(DirectoryEntry<'a>),
-    ) {
+    ) -> impl Iterator<Item = DirectoryEntry<'a>> {
         assert!(inode.mode().is_dir());
         self.list_files_with_owned_inode(inode)
             .filter(|entry| entry.name != b"." && entry.name != b"..")
-            .for_each(move |entry| {
+            .flat_map(move |entry| {
                 let child_inode = self.i.inode(entry.header.inode_offset.get());
                 if child_inode.mode().is_dir() {
                     // For directories, yield the entry and then recurse
                     if yield_dir {
-                        f(entry);
+                        Box::new(
+                            std::iter::once(entry)
+                                .chain(self.list_recursive_files(child_inode, yield_dir)),
+                        )
+                    } else {
+                        Box::new(self.list_recursive_files(child_inode, yield_dir))
+                            as Box<dyn Iterator<Item = DirectoryEntry<'a>>>
                     }
-                    self.list_recursive_files(child_inode, yield_dir, f);
                 } else {
                     // For files, just yield the entry
-                    f(entry);
+                    Box::new(std::iter::once(entry))
                 }
             })
     }
 
     pub fn list_files_with_owned_inode<'a>(
         &'a self,
-        inode: composefs::erofs::reader::InodeType<'a>,
-    ) -> impl Iterator<Item = composefs::erofs::reader::DirectoryEntry<'a>> + use<'a> {
+        inode: InodeType<'a>,
+    ) -> impl Iterator<Item = DirectoryEntry<'a>> {
         assert!(inode.mode().is_dir());
         match (inode.data_layout(), inode.size()) {
             (composefs::erofs::format::DataLayout::ChunkBased, 0) if inode.inline().is_empty() => {
-                Box::new(std::iter::empty())
-                    as Box<dyn Iterator<Item = composefs::erofs::reader::DirectoryEntry<'a>>>
+                Box::new(std::iter::empty()) as Box<dyn Iterator<Item = DirectoryEntry<'_>>>
             }
-            (composefs::erofs::format::DataLayout::ChunkBased, 0) => {
-                Box::new(InlineFilesIter { it: None, inode })
-            }
+            (composefs::erofs::format::DataLayout::ChunkBased, 0) => Box::new(
+                composefs::erofs::reader::DirectoryBlock::ref_from_bytes(inode_inline(&inode))
+                    .unwrap()
+                    .entries(),
+            ),
             _ => {
                 // Directory uses external blocks
-
                 Box::new(
                     inode
                         .blocks(self.i.sb.blkszbits)
@@ -111,18 +90,17 @@ impl<'i> ErofsImage<'i> {
         }
     }
 
-    pub fn list_files<'a>(
+    pub fn list_files<'a, 'b>(
         &'a self,
-        inode: &'a composefs::erofs::reader::InodeType<'a>,
-    ) -> impl Iterator<Item = composefs::erofs::reader::DirectoryEntry<'a>> + use<'a> {
+        inode: &'b InodeType<'a>,
+    ) -> impl Iterator<Item = DirectoryEntry<'a>> {
         assert!(inode.mode().is_dir());
         match (inode.data_layout(), inode.size()) {
             (composefs::erofs::format::DataLayout::ChunkBased, 0) if inode.inline().is_empty() => {
-                Box::new(std::iter::empty())
-                    as Box<dyn Iterator<Item = composefs::erofs::reader::DirectoryEntry<'a>>>
+                Box::new(std::iter::empty()) as Box<dyn Iterator<Item = DirectoryEntry<'a>>>
             }
             (composefs::erofs::format::DataLayout::ChunkBased, 0) => Box::new(
-                composefs::erofs::reader::DirectoryBlock::ref_from_bytes(inode.inline())
+                composefs::erofs::reader::DirectoryBlock::ref_from_bytes(inode_inline(inode))
                     .unwrap()
                     .entries(),
             ),
